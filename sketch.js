@@ -21,6 +21,14 @@ AI 輔助 p5.js 殭屍倖存者遊戲範例
 15. v4 修正：無邊際地圖下，子彈不再用畫布邊界刪除，避免跑遠後自動攻擊失效
 16. v5 新增：Game Over 後存活時間停止、選角頁可直接開始、武器圖鑑、殭屍圖鑑
 17. v6 新增：手機觸控操作，左下角虛擬搖桿，頁面避免滑動，適合上傳 GitHub Pages 後用手機玩
+18. v7 新增：直式畫面 600x900、血量條數字、攻擊傷害跳字、手機電腦都以直版遊玩
+19. v8 修正：圖鑑改成直式單欄排版，文字自動換行，殭屍圖鑑分成普通殭屍與 BOSS 區塊
+20. v9 修正：選角頁文字跑版、傷害/經驗/分數跳字分色、限制怪物與跳字數量避免玩久卡住
+21. v10 修正：補回升級選單 drawUpgradeScreen，避免升級時卡住；修正手機點擊與 Game Over 按鈕位置
+22. v11 修正：Boss 血條下移、武器狀態只顯示已取得武器、怪物速度隨時間提升、初始傷害提高、升級經驗降低
+23. v12 修正：升級卡片文字放入框內、初始子彈顯示於武器資訊、多 Boss 同時顯示多條血量
+24. v13 新增：暫停功能、暫停查看本局升級、武器/技能分離、角色特性影響升級、吸血武器、資訊欄重新排版
+25. v14 修正：暫停按鈕避開武器資訊欄，武器圖鑑直版壓縮排版避免文字與回首頁按鈕重疊
 */
 
 // ============================================================
@@ -62,6 +70,7 @@ let unlockedCharacters = {};
 let playerStats = {};
 
 let upgradeOptions = [];
+let selectedUpgrades = [];
 let justUnlockedMessages = [];
 
 // 背景裝飾、血跡與鏡頭
@@ -85,6 +94,11 @@ let virtualJoystick = {
   r: 58
 };
 
+// 效能保護：避免玩久後怪物、子彈、跳字太多導致卡住
+const MAX_FLOATING_TEXTS = 90;
+const MAX_BULLETS = 100;
+const MAX_BLOOD_STAINS = 160;
+
 let nextId = 1;
 
 // ============================================================
@@ -100,7 +114,7 @@ const characters = [
     color: "#4A90E2",
     maxHp: 100,
     speed: 4,
-    attackBonus: 0,
+    attackBonus: 2,
     cooldownBonus: 0
   },
   {
@@ -111,7 +125,7 @@ const characters = [
     color: "#F5A623",
     maxHp: 80,
     speed: 5.3,
-    attackBonus: 0,
+    attackBonus: 2,
     cooldownBonus: 0
   },
   {
@@ -122,7 +136,7 @@ const characters = [
     color: "#7ED321",
     maxHp: 90,
     speed: 4,
-    attackBonus: 0,
+    attackBonus: 1,
     cooldownBonus: 120
   },
   {
@@ -133,7 +147,7 @@ const characters = [
     color: "#9B9B9B",
     maxHp: 150,
     speed: 3.5,
-    attackBonus: 1,
+    attackBonus: 4,
     cooldownBonus: 0
   }
 ];
@@ -143,7 +157,7 @@ const characters = [
 // ============================================================
 
 function setup() {
-  createCanvas(900, 600);
+  createCanvas(600, 900);
   pixelDensity(1); // 手機效能比較穩
   textFont("Arial");
   createEnvironmentDetails();
@@ -163,6 +177,9 @@ function draw() {
   } else if (gameState === "upgrade") {
     drawGame();
     drawUpgradeScreen();
+  } else if (gameState === "paused") {
+    drawGame();
+    drawPauseScreen();
   } else if (gameState === "gameover") {
     drawGameOverScreen();
   } else if (gameState === "weaponDex") {
@@ -265,15 +282,16 @@ function resetGame() {
     speed: charData.speed,
     level: 1,
     exp: 0,
-    nextExp: 6,
+    nextExp: 4,
     pickupRadius: 38,
     invincibleUntil: 0,
-    baseAttackCooldown: max(180, 650 - charData.cooldownBonus),
-    bulletDamage: 10 + charData.attackBonus,
+    baseAttackCooldown: max(180, 560 - charData.cooldownBonus),
+    bulletDamage: 14 + charData.attackBonus,
     attackRange: 100,
     auraLevel: 0,
     bladeLevel: 0,
     bombLevel: 0,
+    lifestealLevel: 0,
     bulletLevel: 1
   };
 
@@ -285,6 +303,7 @@ function resetGame() {
   floatingTexts = [];
   bloodStains = [];
   upgradeOptions = [];
+  selectedUpgrades = [];
 
   score = 0;
   kills = 0;
@@ -310,6 +329,36 @@ function resetGame() {
 
 function getSelectedCharacter() {
   return characters.find(c => c.id === selectedCharacterId) || characters[0];
+}
+
+function getCharacterGrowth() {
+  // 角色特性會影響技能升級數值。
+  // attack：攻擊力成長
+  // hp：血量成長
+  // speed：速度成長
+  // heal：回復效果
+  if (selectedCharacterId === "runner") {
+    return { attack: 0.9, hp: 0.8, speed: 1.5, heal: 0.9 };
+  }
+
+  if (selectedCharacterId === "scientist") {
+    return { attack: 1.35, hp: 0.85, speed: 1.0, heal: 1.0 };
+  }
+
+  if (selectedCharacterId === "guardian") {
+    return { attack: 1.15, hp: 1.6, speed: 0.75, heal: 1.3 };
+  }
+
+  return { attack: 1.0, hp: 1.0, speed: 1.0, heal: 1.0 };
+}
+
+function healPlayer(amount, label = "HP +") {
+  let actual = min(amount, player.maxHp - player.hp);
+  if (actual <= 0) return 0;
+
+  player.hp += actual;
+  addFloatingText(label + floor(actual), player.x, player.y - 58, "#5EEAD4");
+  return actual;
 }
 
 // ============================================================
@@ -580,17 +629,42 @@ function updateEnemySpawning() {
   }
 }
 
+function getEnemySpeedMultiplier() {
+  // v11：怪物速度會隨存活時間慢慢變快。
+  // 60 秒約 +24%，120 秒約 +48%，最高約 +80%。
+  let survival = getSurvivalSeconds();
+  return constrain(1 + survival * 0.004, 1, 1.8);
+}
+
+function getMaxEnemiesAllowed() {
+  // 前期少一點，後期慢慢增加；手機也比較穩。
+  let survival = getSurvivalSeconds();
+  return floor(constrain(28 + survival * 0.35, 28, 75));
+}
+
 function spawnEnemy(x = null, y = null, small = false) {
+  // v9 效能保護：
+  // 怪物數量隨時間增加，但有上限，避免手機或瀏覽器玩久後卡住。
+  let maxEnemies = getMaxEnemiesAllowed();
+  if (enemies.length >= maxEnemies) {
+    return;
+  }
+
   let pos = randomEdgePosition();
+  let survival = getSurvivalSeconds();
+
+  // v11：前期怪物血量降低，讓基礎角色比較容易打死怪。
+  // 隨時間稍微增加血量，但不要增加太誇張。
+  let baseHp = small ? 10 : random(14, 24) + survival * 0.035;
 
   let enemy = {
     id: nextId++,
     x: x === null ? pos.x : x,
     y: y === null ? pos.y : y,
     r: small ? 10 : random(12, 18),
-    hp: small ? 12 : random(18, 32),
-    maxHp: small ? 12 : random(18, 32),
-    speed: small ? random(1.6, 2.4) : random(0.9, 1.8) + getSurvivalSeconds() * 0.006,
+    hp: baseHp,
+    maxHp: baseHp,
+    speed: small ? random(1.6, 2.4) : random(0.9, 1.65),
     damage: small ? 8 : 10,
     color: small ? "#7FFF7F" : "#55C667",
     lastBladeHit: 0
@@ -600,14 +674,18 @@ function spawnEnemy(x = null, y = null, small = false) {
 }
 
 function updateEnemies() {
+  let speedMultiplier = getEnemySpeedMultiplier();
+
   for (let e of enemies) {
-    moveToward(e, player.x, player.y, e.speed);
+    moveToward(e, player.x, player.y, e.speed * speedMultiplier);
   }
 
-  // 清掉死亡殭屍
+  // 清掉死亡殭屍，也順便清掉離玩家太遠的殭屍，避免無邊際地圖玩久後累積太多物件。
   for (let i = enemies.length - 1; i >= 0; i--) {
     if (enemies[i].hp <= 0) {
       killEnemy(i);
+    } else if (dist(enemies[i].x, enemies[i].y, player.x, player.y) > 1500 && enemies.length > 25) {
+      enemies.splice(i, 1);
     }
   }
 }
@@ -620,7 +698,7 @@ function killEnemy(index) {
 
   spawnBloodStain(e.x, e.y, e.r, false);
   spawnExpGem(e.x, e.y, 1);
-  addFloatingText("+10", e.x, e.y, "#FFD166");
+  addFloatingText("分數 +10", e.x, e.y, "#FFD166");
 
   enemies.splice(index, 1);
 }
@@ -753,6 +831,12 @@ const weaponDexEntries = [
     key: "bomb",
     desc: "每隔幾秒在敵人附近爆炸，範圍內敵人都會受傷。",
     unlock: "升級時選到「小炸彈」"
+  },
+  {
+    name: "吸血之牙",
+    key: "lifesteal",
+    desc: "攻擊命中敵人時有機率回復生命，等級越高回復越穩定。",
+    unlock: "升級時選到「吸血之牙」"
   }
 ];
 
@@ -854,6 +938,7 @@ function updateBosses() {
       }
     }
 
+    actualSpeed *= constrain(1 + getSurvivalSeconds() * 0.0025, 1, 1.55);
     moveToward(b, player.x, player.y, actualSpeed);
   }
 
@@ -871,7 +956,7 @@ function killBoss(index) {
   score += 200;
   spawnBloodStain(b.x, b.y, b.r, true);
   spawnExpGem(b.x, b.y, 8);
-  addFloatingText("Boss 擊敗！+200", b.x, b.y, "#FFD166");
+  addFloatingText("Boss 擊敗！分數 +200", b.x, b.y, "#FFD166");
 
   if (b.kind === "splitter") {
     for (let i = 0; i < 8; i++) {
@@ -950,33 +1035,55 @@ function drawBossBody(b) {
 function drawBossTopHpBar() {
   if (bosses.length === 0) return;
 
-  // 只顯示第一隻 Boss 的血條
-  let b = bosses[0];
-
-  let barW = 520;
-  let barH = 18;
+  // v12：如果同時有多隻 Boss，逐條顯示血量。
+  // 為了避免跟左上 HUD 和右上武器資訊重疊，血條從中段開始往下排。
+  let barW = 500;
+  let barH = 16;
   let x = width / 2 - barW / 2;
-  let y = 48;
+  let startY = 190;
+  let gapY = 50;
 
-  fill(20, 20, 25, 220);
-  rect(x - 8, y - 26, barW + 16, 54, 8);
+  let showCount = min(bosses.length, 4);
 
-  fill(255);
-  textAlign(CENTER, CENTER);
-  textSize(16);
-  text("BOSS：" + b.name, width / 2, y - 13);
+  for (let i = 0; i < showCount; i++) {
+    let b = bosses[i];
+    let y = startY + i * gapY;
 
-  noStroke();
-  fill("#4A4A4A");
-  rect(x, y, barW, barH, 8);
+    fill(20, 20, 25, 220);
+    noStroke();
+    rect(x - 8, y - 25, barW + 16, 46, 8);
 
-  let ratio = constrain(b.hp / b.maxHp, 0, 1);
-  fill("#FF4D4D");
-  rect(x, y, barW * ratio, barH, 8);
+    fill(255);
+    textAlign(CENTER, CENTER);
+    textSize(14);
+    text("BOSS：" + b.name, width / 2, y - 12);
 
-  stroke(255);
-  noFill();
-  rect(x, y, barW, barH, 8);
+    noStroke();
+    fill("#4A4A4A");
+    rect(x, y, barW, barH, 8);
+
+    let ratio = constrain(b.hp / b.maxHp, 0, 1);
+    fill("#FF4D4D");
+    rect(x, y, barW * ratio, barH, 8);
+
+    stroke(255);
+    noFill();
+    rect(x, y, barW, barH, 8);
+
+    noStroke();
+    fill(255);
+    textAlign(CENTER, CENTER);
+    textSize(11);
+    text(floor(max(0, b.hp)) + " / " + floor(b.maxHp), x + barW / 2, y + barH / 2 + 1);
+  }
+
+  if (bosses.length > showCount) {
+    fill(255);
+    noStroke();
+    textAlign(CENTER, CENTER);
+    textSize(12);
+    text("還有 " + (bosses.length - showCount) + " 隻 Boss", width / 2, startY + showCount * gapY - 8);
+  }
 }
 
 // ============================================================
@@ -1017,6 +1124,10 @@ function findNearestTarget() {
 }
 
 function shootBulletAt(target) {
+  if (bullets.length > MAX_BULLETS) {
+    bullets.splice(0, bullets.length - MAX_BULLETS);
+  }
+
   let angle = atan2(target.y - player.y, target.x - player.x);
   let speed = 8.5;
 
@@ -1048,7 +1159,7 @@ function updateBullets() {
     // 打一般殭屍
     for (let e of enemies) {
       if (dist(bullet.x, bullet.y, e.x, e.y) < bullet.r + e.r) {
-        e.hp -= bullet.damage;
+        applyDamageToTarget(e, bullet.damage, "#FF4D4D");
         bullet.life = 0;
         break;
       }
@@ -1058,7 +1169,7 @@ function updateBullets() {
     if (bullet.life > 0) {
       for (let b of bosses) {
         if (dist(bullet.x, bullet.y, b.x, b.y) < bullet.r + b.r) {
-          b.hp -= bullet.damage;
+          applyDamageToTarget(b, bullet.damage, "#FF4D4D");
           bullet.life = 0;
           break;
         }
@@ -1145,7 +1256,7 @@ function updateBladeWeapon() {
     for (let t of allTargets) {
       if (dist(bx, by, t.x, t.y) < 10 + t.r) {
         if (millis() - t.lastBladeHit > 350) {
-          t.hp -= bladeDamage;
+          applyDamageToTarget(t, bladeDamage, "#FF8A4C");
           t.lastBladeHit = millis();
         }
       }
@@ -1216,7 +1327,7 @@ function updateExplosions() {
       if (ex.damagedIds.includes(t.id)) continue;
 
       if (dist(ex.x, ex.y, t.x, t.y) < ex.r + t.r) {
-        t.hp -= ex.damage;
+        applyDamageToTarget(t, ex.damage, "#FF6B9A");
         ex.damagedIds.push(t.id);
       }
     }
@@ -1242,16 +1353,35 @@ function drawExplosions() {
   pop();
 }
 
+function applyDamageToTarget(target, amount, colorValue = "#FF4D4D") {
+  target.hp -= amount;
+
+  // v9：同一個目標短時間內不要一直產生跳字，避免玩久卡住。
+  if (!target.lastDamageTextTime || millis() - target.lastDamageTextTime > 120) {
+    addFloatingText("-" + floor(amount), target.x, target.y - target.r - 8, colorValue);
+    target.lastDamageTextTime = millis();
+  }
+
+  // v13：吸血之牙。攻擊命中敵人時，有機率幫玩家回復生命。
+  if (player && player.lifestealLevel > 0 && player.hp < player.maxHp) {
+    let chance = min(0.10 + player.lifestealLevel * 0.035, 0.32);
+    if (random() < chance) {
+      let healAmount = 1 + floor(player.lifestealLevel / 2);
+      healPlayer(healAmount, "吸血 +");
+    }
+  }
+}
+
 function damageTargetsInRange(x, y, radius, damage) {
   for (let e of enemies) {
     if (dist(x, y, e.x, e.y) < radius + e.r) {
-      e.hp -= damage;
+      applyDamageToTarget(e, damage, "#FF3B30");
     }
   }
 
   for (let b of bosses) {
     if (dist(x, y, b.x, b.y) < radius + b.r) {
-      b.hp -= damage;
+      applyDamageToTarget(b, damage, "#FF3B30");
     }
   }
 }
@@ -1306,11 +1436,12 @@ function drawExpGems() {
 
 function gainExp(amount) {
   player.exp += amount;
+  addFloatingText("EXP +" + amount, player.x, player.y - 34, "#5EEAD4");
 
   while (player.exp >= player.nextExp) {
     player.exp -= player.nextExp;
     player.level++;
-    player.nextExp = floor(player.nextExp * 1.35 + 3);
+    player.nextExp = floor(player.nextExp * 1.22 + 2);
     openUpgradeMenu();
     break;
   }
@@ -1322,57 +1453,125 @@ function openUpgradeMenu() {
 }
 
 function createUpgradeOptions() {
-  const pool = [
+  let g = getCharacterGrowth();
+
+  const weaponPool = [
     {
-      name: "閃電鞋",
-      desc: "移動速度 +0.5",
-      apply: () => { player.speed += 0.5; }
-    },
-    {
-      name: "快速射擊",
-      desc: "自動攻擊速度變快",
-      apply: () => { player.baseAttackCooldown = max(160, player.baseAttackCooldown - 70); }
-    },
-    {
-      name: "強力子彈",
-      desc: "子彈傷害 +4",
-      apply: () => { player.bulletDamage += 4; }
-    },
-    {
-      name: "雙重子彈",
-      desc: "子彈等級 +1",
-      apply: () => { player.bulletLevel++; }
-    },
-    {
-      name: "能量補給",
-      desc: "最大 HP +20，並回復 20 HP",
+      type: "武器",
+      name: "自動子彈",
+      desc: "升級主要攻擊武器。子彈等級 +1，並稍微提高傷害。",
       apply: () => {
-        player.maxHp += 20;
-        player.hp = min(player.maxHp, player.hp + 20);
+        player.bulletLevel++;
+        player.bulletDamage += 2;
+        return "子彈 Lv." + player.bulletLevel + "，傷害 +2";
       }
     },
     {
-      name: "磁鐵背包",
-      desc: "撿經驗範圍增加",
-      apply: () => { player.pickupRadius += 25; }
-    },
-    {
+      type: "武器",
       name: "守護光環",
-      desc: "解鎖或升級光環武器",
-      apply: () => { player.auraLevel++; }
+      desc: "解鎖或升級光環。靠近玩家的敵人會持續受到傷害。",
+      apply: () => {
+        player.auraLevel++;
+        return "光環 Lv." + player.auraLevel;
+      }
     },
     {
+      type: "武器",
       name: "旋轉刀",
-      desc: "解鎖或升級旋轉刀",
-      apply: () => { player.bladeLevel++; }
+      desc: "解鎖或升級旋轉刀。小刀會繞著玩家攻擊敵人。",
+      apply: () => {
+        player.bladeLevel++;
+        return "旋轉刀 Lv." + player.bladeLevel;
+      }
     },
     {
+      type: "武器",
       name: "小炸彈",
-      desc: "解鎖或升級炸彈武器",
-      apply: () => { player.bombLevel++; }
+      desc: "解鎖或升級炸彈。每隔一段時間在敵人附近爆炸。",
+      apply: () => {
+        player.bombLevel++;
+        return "炸彈 Lv." + player.bombLevel;
+      }
+    },
+    {
+      type: "武器",
+      name: "吸血之牙",
+      desc: "攻擊命中時有機率回復生命。等級越高，吸血越穩定。",
+      apply: () => {
+        player.lifestealLevel++;
+        return "吸血之牙 Lv." + player.lifestealLevel;
+      }
     }
   ];
 
+  const skillPool = [
+    {
+      type: "技能",
+      name: "力量訓練",
+      desc: "依角色攻擊特性提高攻擊力。博士加成較高，戰士也不錯。",
+      apply: () => {
+        let amount = ceil(4 * g.attack);
+        player.bulletDamage += amount;
+        return "攻擊力 +" + amount;
+      }
+    },
+    {
+      type: "技能",
+      name: "體能訓練",
+      desc: "依角色血量特性提高最大生命，並回復一部分生命。",
+      apply: () => {
+        let amount = ceil(18 * g.hp);
+        let heal = ceil(amount * 0.55);
+        player.maxHp += amount;
+        let healed = healPlayer(heal, "回復 +");
+        return "最大 HP +" + amount + "，回復 " + healed;
+      }
+    },
+    {
+      type: "技能",
+      name: "疾風步伐",
+      desc: "依角色速度特性提高移動速度。跑酷少年加成最高。",
+      apply: () => {
+        let amount = round(0.35 * g.speed * 10) / 10;
+        player.speed += amount;
+        return "速度 +" + amount;
+      }
+    },
+    {
+      type: "技能",
+      name: "戰鬥專注",
+      desc: "降低自動攻擊冷卻時間，讓攻擊更頻繁。",
+      apply: () => {
+        let reduce = ceil(45 * g.attack);
+        player.baseAttackCooldown = max(140, player.baseAttackCooldown - reduce);
+        return "攻擊冷卻 -" + reduce + "ms";
+      }
+    },
+    {
+      type: "技能",
+      name: "急救補給",
+      desc: "依角色回復特性恢復生命。坦克型角色回復較多。",
+      apply: () => {
+        let amount = ceil(22 * g.heal);
+        let healed = healPlayer(amount, "急救 +");
+        return "回復 HP " + healed;
+      }
+    },
+    {
+      type: "技能",
+      name: "磁鐵背包",
+      desc: "增加拾取經驗球的範圍，比較容易撿到經驗。",
+      apply: () => {
+        player.pickupRadius += 28;
+        return "拾取範圍 +28";
+      }
+    }
+  ];
+
+  let pool = weaponPool.concat(skillPool);
+
+  // 讓每次升級比較像 Vampire Survivors / 弓箭傳說：
+  // 可能出武器，也可能出技能，但盡量不要三個都太像。
   shuffle(pool, true);
   return pool.slice(0, 3);
 }
@@ -1381,8 +1580,19 @@ function chooseUpgrade(index) {
   if (gameState !== "upgrade") return;
   if (!upgradeOptions[index]) return;
 
-  upgradeOptions[index].apply();
-  addFloatingText("升級：" + upgradeOptions[index].name, width / 2, height / 2 - 80, "#A8FF78");
+  let option = upgradeOptions[index];
+  let effectText = option.apply();
+
+  selectedUpgrades.push({
+    type: option.type,
+    name: option.name,
+    desc: effectText || option.desc,
+    time: getSurvivalSeconds()
+  });
+
+  // 這裡用玩家世界座標，無邊際地圖下才會出現在玩家附近
+  addFloatingText(option.type + "：" + option.name, player.x, player.y - 70, option.type === "武器" ? "#FDE68A" : "#A8FF78");
+
   upgradeOptions = [];
   gameState = "playing";
 }
@@ -1412,7 +1622,7 @@ function checkPlayerHit() {
 function damagePlayer(amount) {
   player.hp -= amount;
   player.invincibleUntil = millis() + 700;
-  addFloatingText("-" + amount, player.x, player.y - 30, "#FF6B6B");
+  addFloatingText("HP -" + amount, player.x, player.y - 42, "#FF1744");
 }
 
 function endGame() {
@@ -1445,7 +1655,7 @@ function drawTitleScreen() {
 
   fill(210);
   textSize(18);
-  text("p5.js Web Editor 示範版 v6 手機版", width / 2, 150);
+  text("p5.js Web Editor 示範版 v14 排版修正版", width / 2, 150);
 
   const charData = getSelectedCharacter();
 
@@ -1457,15 +1667,15 @@ function drawTitleScreen() {
   textSize(15);
   text(charData.desc, width / 2, 238);
 
-  drawButton(width / 2 - 130, 300, 260, 46, "Enter：開始遊戲");
-  drawButton(width / 2 - 130, 358, 260, 46, "C：選擇角色");
-  drawButton(width / 2 - 130, 416, 260, 46, "W：武器圖鑑");
-  drawButton(width / 2 - 130, 474, 260, 46, "Z：殭屍圖鑑");
+  drawButton(width / 2 - 140, 300, 280, 52, "Enter：開始遊戲");
+  drawButton(width / 2 - 140, 365, 280, 52, "C：選擇角色");
+  drawButton(width / 2 - 140, 430, 280, 52, "W：武器圖鑑");
+  drawButton(width / 2 - 140, 495, 280, 52, "Z：殭屍圖鑑");
 
   fill(170);
   textSize(14);
-  text("電腦：WASD / 方向鍵移動｜手機：左下角搖桿移動｜攻擊會自動發射", width / 2, 548);
-  text("升級時按 1 / 2 / 3 或直接點選｜建議手機橫向遊玩｜R：清除存檔", width / 2, 574);
+  text("電腦：WASD / 方向鍵移動｜手機：左下角搖桿移動", width / 2, 610);
+  text("攻擊自動發射｜升級按 1 / 2 / 3 或點選｜R：清除存檔", width / 2, 638);
 }
 
 function drawCharacterScreen() {
@@ -1474,20 +1684,22 @@ function drawCharacterScreen() {
   fill(255);
   textAlign(CENTER, CENTER);
   textSize(34);
-  text("選擇角色", width / 2, 55);
+  text("選擇角色", width / 2, 48);
 
-  textSize(15);
+  textSize(14);
   fill(190);
-  text("按 1 / 2 / 3 / 4 或用滑鼠點選角色。選好後按 Enter 或點開始遊戲。", width / 2, 88);
+  text("點角色卡片或按 1 / 2 / 3 / 4 選擇，Enter 可直接開始", width / 2, 78);
 
-  let startX = 85;
-  let cardW = 175;
-  let cardH = 280;
+  let cardW = 500;
+  let cardH = 126;
+  let startX = width / 2 - cardW / 2;
+  let startY = 100;
+  let gapY = 142;
 
   for (let i = 0; i < characters.length; i++) {
     let c = characters[i];
-    let x = startX + i * 205;
-    let y = 130;
+    let x = startX;
+    let y = startY + i * gapY;
     let unlocked = unlockedCharacters[c.id];
 
     fill(c.id === selectedCharacterId ? "#273B5E" : "#1E222E");
@@ -1497,116 +1709,76 @@ function drawCharacterScreen() {
 
     noStroke();
     fill(unlocked ? c.color : "#555");
-    circle(x + cardW / 2, y + 55, 56);
+    circle(x + 54, y + 60, 58);
 
     fill(255);
-    textSize(18);
-    textAlign(CENTER, CENTER);
-    text((i + 1) + ". " + c.name, x + cardW / 2, y + 112);
+    textSize(19);
+    textAlign(LEFT, CENTER);
+    text((i + 1) + ". " + c.name, x + 105, y + 28);
 
     fill(unlocked ? 210 : 120);
     textSize(13);
-    text(c.desc, x + 18, y + 142, cardW - 36, 58);
+    textAlign(LEFT, TOP);
+    drawWrappedText(c.desc, x + 105, y + 50, cardW - 130, 18, 2);
 
     fill(unlocked ? "#A8FF78" : "#FFB86C");
     textSize(13);
-    text(unlocked ? "已解鎖" : c.unlockText, x + 15, y + 222, cardW - 30, 42);
+    drawWrappedText(unlocked ? "已解鎖" : c.unlockText, x + 105, y + 88, cardW - 130, 17, 2);
   }
 
   fill(170);
-  textSize(14);
+  textSize(12);
   textAlign(CENTER, CENTER);
-  text("最高分：" + playerStats.highScore + "｜最長存活：" + playerStats.maxSurvival + " 秒｜累積擊殺：" + playerStats.totalKills + "｜Boss 擊殺：" + playerStats.totalBossKills, width / 2, 440);
+  text("最高分：" + playerStats.highScore + "｜最長：" + playerStats.maxSurvival + " 秒｜擊殺：" + playerStats.totalKills + "｜Boss：" + playerStats.totalBossKills, width / 2, 690);
 
-  drawButton(width / 2 - 280, 480, 180, 42, "B：回首頁");
-  drawButton(width / 2 - 90, 480, 180, 42, "Enter：開始");
-  drawButton(width / 2 + 100, 480, 180, 42, "W：武器圖鑑");
-  drawButton(width / 2 - 90, 535, 180, 42, "Z：殭屍圖鑑");
+  drawButton(width / 2 - 240, 720, 150, 42, "B：回首頁");
+  drawButton(width / 2 - 75, 720, 150, 42, "Enter：開始");
+  drawButton(width / 2 + 90, 720, 150, 42, "武器圖鑑");
+  drawButton(width / 2 - 75, 772, 150, 38, "殭屍圖鑑");
 }
-
-function drawUpgradeScreen() {
-  fill(0, 0, 0, 160);
-  rect(0, 0, width, height);
-
-  fill(255);
-  textAlign(CENTER, CENTER);
-  textSize(34);
-  text("升級！選擇一個能力", width / 2, 150);
-
-  let cardW = 220;
-  let cardH = 150;
-  let gap = 25;
-  let totalW = cardW * 3 + gap * 2;
-  let startX = width / 2 - totalW / 2;
-
-  for (let i = 0; i < 3; i++) {
-    let x = startX + i * (cardW + gap);
-    let y = 250;
-    let option = upgradeOptions[i];
-
-    fill("#1E293B");
-    stroke("#A8FF78");
-    strokeWeight(2);
-    rect(x, y, cardW, cardH, 16);
-
-    noStroke();
-    fill("#A8FF78");
-    textSize(22);
-    text((i + 1) + ". " + option.name, x + cardW / 2, y + 45);
-
-    fill(230);
-    textSize(16);
-    text(option.desc, x + 20, y + 90, cardW - 40, 50);
-  }
-
-  fill(220);
-  textSize(15);
-  text("按鍵盤 1 / 2 / 3 選擇，也可以用滑鼠點選", width / 2, 450);
-}
-
 
 function drawWeaponDexScreen() {
   drawGridBackground();
 
   fill(255);
   textAlign(CENTER, CENTER);
-  textSize(36);
-  text("武器圖鑑", width / 2, 55);
+  textSize(34);
+  text("武器圖鑑", width / 2, 42);
 
   fill(190);
-  textSize(15);
-  text("這裡整理目前遊戲中的武器。按 B 回首頁，按 C 選角色。", width / 2, 88);
+  textSize(13);
+  text("目前遊戲中的武器。按 B 回首頁，按 C 選角色。", width / 2, 74);
 
-  let cardW = 370;
-  let cardH = 145;
-  let startX = 75;
-  let startY = 125;
+  // v14：直版壓縮排版，5 個武器都能完整放進 600x900。
+  let cardW = 520;
+  let cardH = 112;
+  let startX = width / 2 - cardW / 2;
+  let startY = 105;
+  let gapY = 126;
 
   for (let i = 0; i < weaponDexEntries.length; i++) {
     let item = weaponDexEntries[i];
-    let col = i % 2;
-    let row = floor(i / 2);
-    let x = startX + col * 405;
-    let y = startY + row * 175;
+    let x = startX;
+    let y = startY + i * gapY;
 
     drawDexCard(x, y, cardW, cardH);
-    drawWeaponIcon(item.key, x + 62, y + 72, 1);
+    drawWeaponIcon(item.key, x + 55, y + 58, 0.85);
 
     fill(255);
     textAlign(LEFT, TOP);
-    textSize(20);
-    text(item.name, x + 125, y + 25);
+    textSize(19);
+    text(item.name, x + 108, y + 17);
 
     fill(210);
-    textSize(14);
-    text(item.desc, x + 125, y + 58, 220, 52);
+    textSize(12.5);
+    drawWrappedText(item.desc, x + 108, y + 46, cardW - 130, 18, 2);
 
     fill("#A8FF78");
-    textSize(13);
-    text("取得方式：" + item.unlock, x + 125, y + 115, 220, 24);
+    textSize(12.5);
+    drawWrappedText("取得方式：" + item.unlock, x + 108, y + 82, cardW - 130, 17, 1);
   }
 
-  drawButton(width / 2 - 100, 535, 200, 42, "B：回首頁");
+  drawButton(width / 2 - 120, 792, 240, 42, "B：回首頁");
 }
 
 function drawZombieDexScreen() {
@@ -1615,51 +1787,122 @@ function drawZombieDexScreen() {
   fill(255);
   textAlign(CENTER, CENTER);
   textSize(36);
-  text("殭屍圖鑑", width / 2, 55);
+  text("殭屍圖鑑", width / 2, 42);
 
   fill(190);
-  textSize(15);
-  text("這裡整理一般殭屍與 Boss。按 B 回首頁，按 C 選角色。", width / 2, 88);
+  textSize(14);
+  text("一般怪物與 BOSS 分區整理。按 B 回首頁，按 C 選角色。", width / 2, 75);
 
-  let cardW = 255;
-  let cardH = 135;
-  let startX = 55;
-  let startY = 120;
+  let normalEnemies = zombieDexEntries.filter(item => item.type === "enemy");
+  let bossEnemies = zombieDexEntries.filter(item => item.type === "boss");
 
-  for (let i = 0; i < zombieDexEntries.length; i++) {
-    let item = zombieDexEntries[i];
-    let col = i % 3;
-    let row = floor(i / 3);
-    let x = startX + col * 285;
-    let y = startY + row * 165;
+  let cardW = 520;
+  let startX = width / 2 - cardW / 2;
 
-    drawDexCard(x, y, cardW, cardH);
+  // 普通殭屍區
+  drawDexSectionTitle("普通殭屍", 112);
 
-    if (item.type === "enemy") {
-      let rr = item.key === "small" ? 13 : 18;
-      drawZombieBody(x + 52, y + 68, rr, item.key === "small" ? "#7FFF7F" : "#55C667", 1);
-    } else {
-      let type = bossTypes.find(b => b.kind === item.key);
-      drawBossBody({
-        x: x + 52,
-        y: y + 70,
-        r: 24,
-        kind: item.key,
-        color: type ? type.color : "#B34747"
-      });
-    }
+  for (let i = 0; i < normalEnemies.length; i++) {
+    let item = normalEnemies[i];
+    let x = startX;
+    let y = 138 + i * 105;
+
+    drawDexCard(x, y, cardW, 92);
+
+    let rr = item.key === "small" ? 13 : 18;
+    drawZombieBody(x + 55, y + 50, rr, item.key === "small" ? "#7FFF7F" : "#55C667", 1);
+
+    fill(255);
+    textAlign(LEFT, TOP);
+    textSize(19);
+    text(item.name, x + 108, y + 18);
+
+    fill(210);
+    textSize(13);
+    drawWrappedText(item.desc, x + 108, y + 48, cardW - 135, 19, 2);
+  }
+
+  // BOSS 區
+  drawDexSectionTitle("BOSS", 360);
+
+  for (let i = 0; i < bossEnemies.length; i++) {
+    let item = bossEnemies[i];
+    let x = startX;
+    let y = 388 + i * 92;
+
+    drawDexCard(x, y, cardW, 78);
+
+    let type = bossTypes.find(b => b.kind === item.key);
+    drawBossBody({
+      x: x + 55,
+      y: y + 45,
+      r: 19,
+      kind: item.key,
+      color: type ? type.color : "#B34747"
+    });
 
     fill(255);
     textAlign(LEFT, TOP);
     textSize(18);
-    text(item.name, x + 100, y + 22);
+    text(item.name, x + 108, y + 12);
 
     fill(210);
     textSize(13);
-    text(item.desc, x + 100, y + 56, 135, 64);
+    drawWrappedText(item.desc, x + 108, y + 40, cardW - 135, 18, 2);
   }
 
-  drawButton(width / 2 - 100, 535, 200, 42, "B：回首頁");
+  drawButton(width / 2 - 120, 792, 240, 42, "B：回首頁");
+}
+
+function drawDexSectionTitle(title, y) {
+  textAlign(LEFT, CENTER);
+  textSize(22);
+  fill("#A8FF78");
+  noStroke();
+  text(title, 42, y);
+
+  stroke("#A8FF78");
+  strokeWeight(2);
+  line(42, y + 21, width - 42, y + 21);
+  noStroke();
+}
+
+function drawWrappedText(str, x, y, maxWidth, lineHeight, maxLines = 3) {
+  let chars = Array.from(str);
+  let lines = [];
+  let line = "";
+  let index = 0;
+
+  while (index < chars.length) {
+    let testLine = line + chars[index];
+
+    if (textWidth(testLine) > maxWidth && line.length > 0) {
+      lines.push(line);
+      line = "";
+
+      if (lines.length >= maxLines) break;
+    } else {
+      line = testLine;
+      index++;
+    }
+  }
+
+  if (line.length > 0 && lines.length < maxLines) {
+    lines.push(line);
+  }
+
+  // 超過行數時加省略號，避免文字跑出卡片
+  if (index < chars.length && lines.length > 0) {
+    let last = lines[lines.length - 1];
+    while (textWidth(last + "…") > maxWidth && last.length > 0) {
+      last = last.slice(0, -1);
+    }
+    lines[lines.length - 1] = last + "…";
+  }
+
+  for (let i = 0; i < lines.length; i++) {
+    text(lines[i], x, y + i * lineHeight);
+  }
 }
 
 function drawDexCard(x, y, w, h) {
@@ -1708,9 +1951,150 @@ function drawWeaponIcon(kind, x, y, level) {
     stroke("#FFB703");
     strokeWeight(3);
     line(6, -10, 14, -20);
+  } else if (kind === "lifesteal") {
+    noStroke();
+    fill("#A855F7");
+    circle(0, 0, 36);
+    fill("#FDE68A");
+    triangle(-7, -8, -1, 8, -12, 8);
+    triangle(7, -8, 1, 8, 12, 8);
+    fill("#F43F5E");
+    circle(0, -2, 10);
   }
 
   pop();
+}
+
+function drawPauseScreen() {
+  fill(0, 0, 0, 190);
+  noStroke();
+  rect(0, 0, width, height);
+
+  fill(255);
+  textAlign(CENTER, CENTER);
+  textSize(36);
+  text("暫停", width / 2, 72);
+
+  fill(220);
+  textSize(14);
+  text("按 P / ESC / Enter 繼續，或點擊下方按鈕", width / 2, 108);
+
+  let panelX = 48;
+  let panelY = 145;
+  let panelW = width - 96;
+  let panelH = 560;
+
+  fill("#111827");
+  stroke("#A8FF78");
+  strokeWeight(2);
+  rect(panelX, panelY, panelW, panelH, 16);
+
+  noStroke();
+  fill("#A8FF78");
+  textAlign(LEFT, TOP);
+  textSize(20);
+  text("本局已選升級", panelX + 25, panelY + 24);
+
+  fill(220);
+  textSize(13);
+  text("武器和技能分開紀錄，方便學生回顧這局的養成路線。", panelX + 25, panelY + 56);
+
+  let listX = panelX + 25;
+  let listY = panelY + 94;
+
+  if (selectedUpgrades.length === 0) {
+    fill(180);
+    textSize(15);
+    text("目前還沒有選過升級。", listX, listY);
+  } else {
+    let maxShow = min(selectedUpgrades.length, 13);
+    let startIndex = max(0, selectedUpgrades.length - maxShow);
+
+    for (let i = startIndex; i < selectedUpgrades.length; i++) {
+      let item = selectedUpgrades[i];
+      let row = i - startIndex;
+      let y = listY + row * 34;
+
+      fill(item.type === "武器" ? "#FDE68A" : "#A8FF78");
+      textSize(14);
+      text((i + 1) + ". [" + item.type + "] " + item.name, listX, y);
+
+      fill(205);
+      textSize(12);
+      drawWrappedText(item.desc, listX + 20, y + 17, panelW - 70, 16, 1);
+    }
+
+    if (selectedUpgrades.length > maxShow) {
+      fill(160);
+      textSize(12);
+      text("只顯示最近 " + maxShow + " 個升級。", listX, panelY + panelH - 35);
+    }
+  }
+
+  drawButton(width / 2 - 210, 740, 420, 48, "繼續遊戲");
+  drawButton(width / 2 - 210, 805, 420, 42, "回首頁");
+}
+
+function drawUpgradeScreen() {
+  // 升級時，遊戲畫面先畫在後面，這裡再蓋一層半透明黑幕
+  fill(0, 0, 0, 178);
+  noStroke();
+  rect(0, 0, width, height);
+
+  fill(255);
+  textAlign(CENTER, CENTER);
+  textSize(31);
+  text("升級！選擇一個能力", width / 2, 135);
+
+  fill(220);
+  textSize(14);
+  text("武器與技能會隨機出現｜按 1 / 2 / 3 或點選卡片", width / 2, 174);
+
+  let cardW = 460;
+  let cardH = 126;
+  let startX = width / 2 - cardW / 2;
+  let startY = 225;
+  let gapY = 152;
+
+  for (let i = 0; i < 3; i++) {
+    let option = upgradeOptions[i];
+    if (!option) continue;
+
+    let x = startX;
+    let y = startY + i * gapY;
+
+    fill("#1E293B");
+    stroke(option.type === "武器" ? "#FDE68A" : "#A8FF78");
+    strokeWeight(2);
+    rect(x, y, cardW, cardH, 16);
+
+    noStroke();
+
+    // 類型標籤
+    fill(option.type === "武器" ? "#FDE68A" : "#A8FF78");
+    rect(x + 18, y + 17, 54, 26, 8);
+    fill("#111827");
+    textAlign(CENTER, CENTER);
+    textSize(14);
+    text(option.type, x + 45, y + 30);
+
+    // 標題
+    fill(option.type === "武器" ? "#FDE68A" : "#A8FF78");
+    textAlign(LEFT, CENTER);
+    textSize(21);
+    text((i + 1) + ". " + option.name, x + 88, y + 31);
+
+    // 說明文字，固定放在框內
+    fill(235);
+    textAlign(LEFT, TOP);
+    textSize(15);
+    drawWrappedText(option.desc, x + 30, y + 62, cardW - 60, 21, 3);
+  }
+
+  fill(180);
+  textAlign(CENTER, CENTER);
+  textSize(13);
+  text("選完後遊戲會繼續", width / 2, 704);
 }
 
 function drawGameOverScreen() {
@@ -1739,9 +2123,9 @@ function drawGameOverScreen() {
     text(justUnlockedMessages[i], width / 2, 392 + i * 28);
   }
 
-  drawButton(width / 2 - 290, 465, 180, 44, "Enter：再玩一次");
-  drawButton(width / 2 - 90, 465, 180, 44, "C：角色選擇");
-  drawButton(width / 2 + 110, 465, 180, 44, "B：回首頁");
+  drawButton(width / 2 - 220, 600, 440, 48, "Enter：再玩一次");
+  drawButton(width / 2 - 220, 665, 440, 48, "C：角色選擇");
+  drawButton(width / 2 - 220, 730, 440, 48, "B：回首頁");
 
   fill(180);
   textSize(14);
@@ -1752,40 +2136,92 @@ function drawGameOverScreen() {
 // 十五、HUD 與畫面小工具
 // ============================================================
 
+function getWeaponStatusLines() {
+  let weaponLines = [];
+  weaponLines.push("子彈 Lv." + player.bulletLevel);
+  if (player.auraLevel > 0) weaponLines.push("光環 Lv." + player.auraLevel);
+  if (player.bladeLevel > 0) weaponLines.push("旋轉刀 Lv." + player.bladeLevel);
+  if (player.bombLevel > 0) weaponLines.push("炸彈 Lv." + player.bombLevel);
+  if (player.lifestealLevel > 0) weaponLines.push("吸血 Lv." + player.lifestealLevel);
+  return weaponLines;
+}
+
+function getWeaponPanelHeight() {
+  return 38 + getWeaponStatusLines().length * 22;
+}
+
 function drawHUD() {
   let survival = getSurvivalSeconds();
 
-  fill(0, 0, 0, 130);
+  // 左上：主要資訊
+  fill(0, 0, 0, 150);
   noStroke();
-  rect(12, 12, 265, 150, 12);
+  rect(12, 12, 292, 168, 12);
 
   fill(255);
   textAlign(LEFT, TOP);
   textSize(15);
   text("HP", 26, 25);
-  drawBar(65, 25, 175, 13, player.hp, player.maxHp, "#FF6B6B");
+  drawBar(65, 25, 205, 15, player.hp, player.maxHp, "#FF6B6B", true);
 
   fill(255);
-  text("LV：" + player.level, 26, 50);
-  text("EXP：" + floor(player.exp) + " / " + player.nextExp, 26, 75);
-  text("分數：" + score, 26, 100);
-  text("擊殺：" + kills, 26, 125);
-  text("時間：" + survival + " 秒", 140, 125);
+  text("LV：" + player.level, 26, 55);
+  text("EXP：" + floor(player.exp) + " / " + player.nextExp, 26, 80);
+  text("分數：" + score, 26, 105);
+  text("擊殺：" + kills, 26, 130);
+  text("時間：" + survival + " 秒", 140, 130);
 
-  // 武器狀態
-  fill(0, 0, 0, 130);
-  rect(width - 230, 12, 215, 135, 12);
+  // 右上：武器資訊，放寬面板，避免文字跑出框外
+  let weaponLines = getWeaponStatusLines();
+
+  let panelX = 318;
+  let panelY = 12;
+  let panelW = width - panelX - 12;
+  let panelH = getWeaponPanelHeight();
+
+  fill(0, 0, 0, 150);
+  rect(panelX, panelY, panelW, panelH, 12);
 
   fill(255);
+  textAlign(LEFT, TOP);
   textSize(14);
-  text("武器狀態", width - 215, 25);
-  text("子彈 Lv." + player.bulletLevel, width - 215, 50);
-  text("光環 Lv." + player.auraLevel, width - 215, 72);
-  text("旋轉刀 Lv." + player.bladeLevel, width - 215, 94);
-  text("炸彈 Lv." + player.bombLevel, width - 215, 116);
+  text("武器狀態", panelX + 15, panelY + 12);
+
+  for (let i = 0; i < weaponLines.length; i++) {
+    text(weaponLines[i], panelX + 15, panelY + 38 + i * 22);
+  }
+
+  // 暫停按鈕
+  if (gameState === "playing") {
+    drawPauseButton();
+  }
 }
 
-function drawBar(x, y, w, h, value, maxValue, colorValue) {
+function getPauseButtonRect() {
+  // v14：暫停按鈕會自動放在右上武器資訊欄下方，避免重疊。
+  let w = 112;
+  let h = 34;
+  let x = width - w - 18;
+  let y = 12 + getWeaponPanelHeight() + 10;
+  return { x, y, w, h };
+}
+
+function drawPauseButton() {
+  let btn = getPauseButtonRect();
+
+  fill(0, 0, 0, 145);
+  stroke("#A8FF78");
+  strokeWeight(1.5);
+  rect(btn.x, btn.y, btn.w, btn.h, 10);
+
+  noStroke();
+  fill(255);
+  textAlign(CENTER, CENTER);
+  textSize(14);
+  text("暫停 P", btn.x + btn.w / 2, btn.y + btn.h / 2);
+}
+
+function drawBar(x, y, w, h, value, maxValue, colorValue, showNumber = false) {
   noStroke();
   fill("#444");
   rect(x, y, w, h, 6);
@@ -1797,15 +2233,31 @@ function drawBar(x, y, w, h, value, maxValue, colorValue) {
   stroke(255);
   noFill();
   rect(x, y, w, h, 6);
+
+  if (showNumber) {
+    noStroke();
+    fill(255);
+    textAlign(CENTER, CENTER);
+    textSize(11);
+    text(floor(max(0, value)) + " / " + floor(maxValue), x + w / 2, y + h / 2 + 0.5);
+  }
 }
 
-function drawMiniHpBar(x, y, w, h, value, maxValue) {
+function drawMiniHpBar(x, y, w, h, value, maxValue, showNumber = false) {
   noStroke();
   fill("#333");
   rect(x, y, w, h, 3);
 
   fill("#FF6B6B");
   rect(x, y, w * constrain(value / maxValue, 0, 1), h, 3);
+
+  if (showNumber) {
+    noStroke();
+    fill(255);
+    textAlign(CENTER, CENTER);
+    textSize(10);
+    text(floor(max(0, value)) + "/" + floor(maxValue), x + w / 2, y + h / 2);
+  }
 }
 
 function drawButton(x, y, w, h, label) {
@@ -2001,8 +2453,8 @@ function spawnBloodStain(x, y, size, isBoss) {
   }
 
   // 避免血跡太多造成效能下降
-  if (bloodStains.length > 180) {
-    bloodStains.splice(0, bloodStains.length - 180);
+  if (bloodStains.length > MAX_BLOOD_STAINS) {
+    bloodStains.splice(0, bloodStains.length - MAX_BLOOD_STAINS);
   }
 }
 
@@ -2034,6 +2486,10 @@ function addFloatingText(txt, x, y, colorValue) {
     color: colorValue,
     life: 70
   });
+
+  if (floatingTexts.length > MAX_FLOATING_TEXTS) {
+    floatingTexts.splice(0, floatingTexts.length - MAX_FLOATING_TEXTS);
+  }
 }
 
 function updateFloatingTexts() {
@@ -2052,10 +2508,15 @@ function updateFloatingTexts() {
 function drawFloatingTexts() {
   textAlign(CENTER, CENTER);
   textSize(16);
-  noStroke();
 
   for (let ft of floatingTexts) {
     let alpha = map(ft.life, 0, 70, 0, 255);
+
+    // 黑色陰影，讓紅色傷害、綠色 EXP、黃色分數更清楚
+    fill(0, 0, 0, alpha * 0.65);
+    noStroke();
+    text(ft.txt, ft.x + 1.5, ft.y + 1.5);
+
     fillWithAlpha(ft.color, alpha);
     text(ft.txt, ft.x, ft.y);
   }
@@ -2151,10 +2612,16 @@ function drawMobileControls() {
 // 手機觸控開始：在非遊戲中頁面，讓按鈕可以更穩定被點擊。
 // 遊戲中則交給 updateVirtualJoystick() 讀取 touches。
 function touchStarted() {
-  if (gameState !== "playing") {
-    if (touches.length > 0) {
-      handlePointerPressed(touches[0].x, touches[0].y);
+  if (gameState === "playing") {
+    // 遊戲中也允許點擊暫停按鈕；其他地方仍作為搖桿使用。
+    let btn = getPauseButtonRect();
+    if (isPointInRect(mouseX, mouseY, btn.x, btn.y, btn.w, btn.h)) {
+      handlePointerPressed(mouseX, mouseY);
     }
+  } else {
+    // 使用 mouseX / mouseY，p5 會自動換算成 canvas 座標，
+    // 避免手機畫面縮放後點擊位置偏掉。
+    handlePointerPressed(mouseX, mouseY);
   }
   return false; // 避免手機頁面滑動或縮放
 }
@@ -2220,10 +2687,22 @@ function keyPressed() {
         saveData();
       }
     }
+  } else if (gameState === "playing") {
+    if (key === "p" || key === "P" || keyCode === ESCAPE) {
+      gameState = "paused";
+    }
   } else if (gameState === "upgrade") {
     if (key === "1") chooseUpgrade(0);
     if (key === "2") chooseUpgrade(1);
     if (key === "3") chooseUpgrade(2);
+    if (keyCode === ENTER) chooseUpgrade(0);
+  } else if (gameState === "paused") {
+    if (key === "p" || key === "P" || keyCode === ESCAPE || keyCode === ENTER) {
+      gameState = "playing";
+    }
+    if (key === "b" || key === "B") {
+      gameState = "title";
+    }
   } else if (gameState === "gameover") {
     if (keyCode === ENTER) {
       resetGame();
@@ -2260,27 +2739,47 @@ function mousePressed() {
 }
 
 function handlePointerPressed(px, py) {
+  if (gameState === "playing") {
+    let btn = getPauseButtonRect();
+    if (isPointInRect(px, py, btn.x, btn.y, btn.w, btn.h)) {
+      gameState = "paused";
+      return;
+    }
+  }
+
+  if (gameState === "paused") {
+    if (isPointInRect(px, py, width / 2 - 210, 740, 420, 48)) {
+      gameState = "playing";
+      return;
+    }
+
+    if (isPointInRect(px, py, width / 2 - 210, 805, 420, 42)) {
+      gameState = "title";
+      return;
+    }
+  }
+
   if (gameState === "title") {
     // 點擊開始遊戲
-    if (isPointInRect(px, py, width / 2 - 130, 300, 260, 46)) {
+    if (isPointInRect(px, py, width / 2 - 140, 300, 280, 52)) {
       resetGame();
       return;
     }
 
     // 點擊選擇角色
-    if (isPointInRect(px, py, width / 2 - 130, 358, 260, 46)) {
+    if (isPointInRect(px, py, width / 2 - 140, 365, 280, 52)) {
       gameState = "character";
       return;
     }
 
     // 點擊武器圖鑑
-    if (isPointInRect(px, py, width / 2 - 130, 416, 260, 46)) {
+    if (isPointInRect(px, py, width / 2 - 140, 430, 280, 52)) {
       gameState = "weaponDex";
       return;
     }
 
     // 點擊殭屍圖鑑
-    if (isPointInRect(px, py, width / 2 - 130, 474, 260, 46)) {
+    if (isPointInRect(px, py, width / 2 - 140, 495, 280, 52)) {
       gameState = "zombieDex";
       return;
     }
@@ -2288,14 +2787,16 @@ function handlePointerPressed(px, py) {
 
   if (gameState === "character") {
     // 點擊角色卡片
-    let startX = 85;
-    let cardW = 175;
-    let cardH = 280;
+    let cardW = 500;
+    let cardH = 126;
+    let startX = width / 2 - cardW / 2;
+    let startY = 100;
+    let gapY = 142;
 
     for (let i = 0; i < characters.length; i++) {
       let c = characters[i];
-      let x = startX + i * 205;
-      let y = 130;
+      let x = startX;
+      let y = startY + i * gapY;
 
       if (isPointInRect(px, py, x, y, cardW, cardH)) {
         if (unlockedCharacters[c.id]) {
@@ -2307,37 +2808,37 @@ function handlePointerPressed(px, py) {
     }
 
     // 選角頁底部按鈕
-    if (isPointInRect(px, py, width / 2 - 280, 480, 180, 42)) {
+    if (isPointInRect(px, py, width / 2 - 240, 720, 150, 42)) {
       gameState = "title";
       return;
     }
 
-    if (isPointInRect(px, py, width / 2 - 90, 480, 180, 42)) {
+    if (isPointInRect(px, py, width / 2 - 75, 720, 150, 42)) {
       resetGame();
       return;
     }
 
-    if (isPointInRect(px, py, width / 2 + 100, 480, 180, 42)) {
+    if (isPointInRect(px, py, width / 2 + 90, 720, 150, 42)) {
       gameState = "weaponDex";
       return;
     }
 
-    if (isPointInRect(px, py, width / 2 - 90, 535, 180, 42)) {
+    if (isPointInRect(px, py, width / 2 - 75, 772, 150, 38)) {
       gameState = "zombieDex";
       return;
     }
   }
 
   if (gameState === "upgrade") {
-    let cardW = 220;
-    let cardH = 150;
-    let gap = 25;
-    let totalW = cardW * 3 + gap * 2;
-    let startX = width / 2 - totalW / 2;
+    let cardW = 460;
+    let cardH = 126;
+    let startX = width / 2 - cardW / 2;
+    let startY = 225;
+    let gapY = 152;
 
     for (let i = 0; i < 3; i++) {
-      let x = startX + i * (cardW + gap);
-      let y = 250;
+      let x = startX;
+      let y = startY + i * gapY;
 
       if (isPointInRect(px, py, x, y, cardW, cardH)) {
         chooseUpgrade(i);
@@ -2347,24 +2848,24 @@ function handlePointerPressed(px, py) {
 
   if (gameState === "gameover") {
     // 點擊再玩一次
-    if (isPointInRect(px, py, width / 2 - 290, 465, 180, 44)) {
+    if (isPointInRect(px, py, width / 2 - 220, 600, 440, 48)) {
       resetGame();
       return;
     }
 
-    if (isPointInRect(px, py, width / 2 - 90, 465, 180, 44)) {
+    if (isPointInRect(px, py, width / 2 - 220, 665, 440, 48)) {
       gameState = "character";
       return;
     }
 
-    if (isPointInRect(px, py, width / 2 + 110, 465, 180, 44)) {
+    if (isPointInRect(px, py, width / 2 - 220, 730, 440, 48)) {
       gameState = "title";
       return;
     }
   }
 
   if (gameState === "weaponDex" || gameState === "zombieDex") {
-    if (isPointInRect(px, py, width / 2 - 100, 535, 200, 42)) {
+    if (isPointInRect(px, py, width / 2 - 120, 792, 240, 42)) {
       gameState = "title";
       return;
     }
