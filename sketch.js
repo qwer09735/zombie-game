@@ -29,6 +29,8 @@ AI 輔助 p5.js 殭屍倖存者遊戲範例
 23. v12 修正：升級卡片文字放入框內、初始子彈顯示於武器資訊、多 Boss 同時顯示多條血量
 24. v13 新增：暫停功能、暫停查看本局升級、武器/技能分離、角色特性影響升級、吸血武器、資訊欄重新排版
 25. v14 修正：暫停按鈕避開武器資訊欄，武器圖鑑直版壓縮排版避免文字與回首頁按鈕重疊
+26. v15 新增：遊戲模式與難度系統。無盡模式每擊殺 30 隻怪物隨機出 Boss；闖關模式 30 秒後依序出 Boss，打完一輪勝利；難度分簡單、中等、困難、極難
+27. v16 修正：模式/難度頁 Enter、B 等鍵盤操作改用全域 keydown 監聽，避免 GitHub Pages 上 canvas 沒有焦點時按鍵失效
 */
 
 // ============================================================
@@ -38,6 +40,7 @@ AI 輔助 p5.js 殭屍倖存者遊戲範例
 let gameState = "title"; 
 // title：首頁
 // character：角色選擇
+// modeSelect：模式與難度選擇
 // playing：遊戲中
 // upgrade：升級選擇中
 // gameover：遊戲結束
@@ -64,6 +67,14 @@ let lastAuraDamageTime = 0;
 let lastBombTime = 0;
 let lastBossSpawnTime = 0;
 let bossSpawnCount = 0;
+
+// 遊戲模式與難度
+let selectedGameMode = "endless"; // endless：無盡模式；stage：闖關模式
+let selectedDifficulty = "normal"; // easy / normal / hard / extreme
+let nextEndlessBossKillTarget = 30;
+let stageBossIndex = 0;
+let stageBossStarted = false;
+let finalGameResult = "dead"; // dead / clear
 
 let selectedCharacterId = "student";
 let unlockedCharacters = {};
@@ -98,6 +109,61 @@ let virtualJoystick = {
 const MAX_FLOATING_TEXTS = 90;
 const MAX_BULLETS = 100;
 const MAX_BLOOD_STAINS = 160;
+
+const difficultyConfigs = {
+  easy: {
+    name: "簡單",
+    enemyHp: 0.75,
+    enemySpeed: 0.85,
+    enemyDamage: 0.75,
+    spawnRate: 0.8,
+    bossHp: 0.75,
+    bossSpeed: 0.85,
+    maxEnemyMultiplier: 0.85
+  },
+  normal: {
+    name: "中等",
+    enemyHp: 1.0,
+    enemySpeed: 1.0,
+    enemyDamage: 1.0,
+    spawnRate: 1.0,
+    bossHp: 1.0,
+    bossSpeed: 1.0,
+    maxEnemyMultiplier: 1.0
+  },
+  hard: {
+    name: "困難",
+    enemyHp: 1.35,
+    enemySpeed: 1.18,
+    enemyDamage: 1.25,
+    spawnRate: 1.25,
+    bossHp: 1.35,
+    bossSpeed: 1.15,
+    maxEnemyMultiplier: 1.18
+  },
+  extreme: {
+    name: "極難",
+    enemyHp: 1.75,
+    enemySpeed: 1.35,
+    enemyDamage: 1.55,
+    spawnRate: 1.55,
+    bossHp: 1.8,
+    bossSpeed: 1.3,
+    maxEnemyMultiplier: 1.35
+  }
+};
+
+function getDifficultyConfig() {
+  return difficultyConfigs[selectedDifficulty] || difficultyConfigs.normal;
+}
+
+function getDifficultyName() {
+  return getDifficultyConfig().name;
+}
+
+function getGameModeName() {
+  return selectedGameMode === "stage" ? "闖關模式" : "無盡模式";
+}
 
 let nextId = 1;
 
@@ -162,6 +228,7 @@ function setup() {
   textFont("Arial");
   createEnvironmentDetails();
   loadSaveData();
+  setupGlobalKeyboardControls();
 }
 
 function draw() {
@@ -169,6 +236,19 @@ function draw() {
 
   if (gameState === "title") {
     drawTitleScreen();
+  } else if (gameState === "modeSelect") {
+    drawModeSelectScreen();
+  } else if (gameState === "modeSelect") {
+    if (keyCode === ENTER) resetGame();
+    if (key === "b" || key === "B") gameState = "title";
+
+    if (key === "1") selectedGameMode = "endless";
+    if (key === "2") selectedGameMode = "stage";
+
+    if (key === "q" || key === "Q") selectedDifficulty = "easy";
+    if (key === "w" || key === "W") selectedDifficulty = "normal";
+    if (key === "e" || key === "E") selectedDifficulty = "hard";
+    if (key === "r" || key === "R") selectedDifficulty = "extreme";
   } else if (gameState === "character") {
     drawCharacterScreen();
   } else if (gameState === "playing") {
@@ -317,6 +397,10 @@ function resetGame() {
   lastBombTime = millis();
   lastBossSpawnTime = millis();
   bossSpawnCount = 0;
+  nextEndlessBossKillTarget = 30;
+  stageBossIndex = 0;
+  stageBossStarted = false;
+  finalGameResult = "dead";
   cameraX = player.x;
   cameraY = player.y;
 
@@ -619,9 +703,10 @@ function drawGuardianHero(mainColor) {
 
 function updateEnemySpawning() {
   let survival = getSurvivalSeconds();
+  let cfg = getDifficultyConfig();
 
-  // 存活越久，生成越快
-  let spawnInterval = max(280, 1100 - survival * 8);
+  // 存活越久，生成越快；難度越高，生成越快。
+  let spawnInterval = max(220, (1100 - survival * 8) / cfg.spawnRate);
 
   if (millis() - lastEnemySpawn > spawnInterval) {
     spawnEnemy();
@@ -637,9 +722,10 @@ function getEnemySpeedMultiplier() {
 }
 
 function getMaxEnemiesAllowed() {
-  // 前期少一點，後期慢慢增加；手機也比較穩。
+  // 前期少一點，後期慢慢增加；難度越高，同時怪物上限越高。
   let survival = getSurvivalSeconds();
-  return floor(constrain(28 + survival * 0.35, 28, 75));
+  let cfg = getDifficultyConfig();
+  return floor(constrain((28 + survival * 0.35) * cfg.maxEnemyMultiplier, 24, 95));
 }
 
 function spawnEnemy(x = null, y = null, small = false) {
@@ -652,10 +738,11 @@ function spawnEnemy(x = null, y = null, small = false) {
 
   let pos = randomEdgePosition();
   let survival = getSurvivalSeconds();
+  let cfg = getDifficultyConfig();
 
-  // v11：前期怪物血量降低，讓基礎角色比較容易打死怪。
-  // 隨時間稍微增加血量，但不要增加太誇張。
+  // v15：難度會影響怪物血量、速度與傷害。
   let baseHp = small ? 10 : random(14, 24) + survival * 0.035;
+  baseHp *= cfg.enemyHp;
 
   let enemy = {
     id: nextId++,
@@ -664,8 +751,8 @@ function spawnEnemy(x = null, y = null, small = false) {
     r: small ? 10 : random(12, 18),
     hp: baseHp,
     maxHp: baseHp,
-    speed: small ? random(1.6, 2.4) : random(0.9, 1.65),
-    damage: small ? 8 : 10,
+    speed: (small ? random(1.6, 2.4) : random(0.9, 1.65)) * cfg.enemySpeed,
+    damage: ceil((small ? 8 : 10) * cfg.enemyDamage),
     color: small ? "#7FFF7F" : "#55C667",
     lastBladeHit: 0
   };
@@ -880,26 +967,51 @@ const zombieDexEntries = [
 ];
 
 function updateBossSpawning() {
-  if (millis() - lastBossSpawnTime > 30000) {
-    spawnBoss();
-    lastBossSpawnTime = millis();
+  // 無盡模式：每擊殺 30 隻一般怪物，隨機出現 1 隻 Boss，不會主動結束。
+  if (selectedGameMode === "endless") {
+    if (kills >= nextEndlessBossKillTarget) {
+      spawnBoss();
+      nextEndlessBossKillTarget += 30;
+    }
+    return;
+  }
+
+  // 闖關模式：第一隻 Boss 在 30 秒後出現。
+  // 打死後會依照順序出現下一隻，打完一輪就勝利。
+  if (selectedGameMode === "stage") {
+    if (!stageBossStarted && getSurvivalSeconds() >= 30 && bosses.length === 0) {
+      stageBossStarted = true;
+      spawnBoss(stageBossIndex);
+    }
   }
 }
 
-function spawnBoss() {
-  let type = bossTypes[bossSpawnCount % bossTypes.length];
+function spawnBoss(typeIndex = null) {
+  let cfg = getDifficultyConfig();
+
+  let type;
+  if (typeIndex === null) {
+    // 無盡模式使用隨機 Boss
+    type = random(bossTypes);
+  } else {
+    // 闖關模式照順序出現
+    type = bossTypes[typeIndex % bossTypes.length];
+  }
+
   bossSpawnCount++;
 
   let pos = randomEdgePosition();
+  let bossHp = (type.maxHp + bossSpawnCount * 55) * cfg.bossHp;
+
   let boss = {
     id: nextId++,
     x: pos.x,
     y: pos.y,
     r: type.r,
-    hp: type.maxHp + bossSpawnCount * 60,
-    maxHp: type.maxHp + bossSpawnCount * 60,
-    speed: type.speed + bossSpawnCount * 0.04,
-    damage: 22,
+    hp: bossHp,
+    maxHp: bossHp,
+    speed: (type.speed + bossSpawnCount * 0.035) * cfg.bossSpeed,
+    damage: ceil(22 * cfg.enemyDamage),
     kind: type.kind,
     name: type.name,
     color: type.color,
@@ -909,7 +1021,9 @@ function spawnBoss() {
   };
 
   bosses.push(boss);
-  addFloatingText("Boss 出現！" + boss.name, width / 2, 90, "#FF6B6B");
+
+  let modeText = selectedGameMode === "stage" ? "闖關 Boss " + (stageBossIndex + 1) + "：" : "無盡 Boss：";
+  addFloatingText(modeText + boss.name, player.x, player.y - 120, "#FF6B6B");
 }
 
 function updateBosses() {
@@ -965,6 +1079,18 @@ function killBoss(index) {
   }
 
   bosses.splice(index, 1);
+
+  // 闖關模式：打死一隻 Boss 後，依序出現下一隻。
+  if (selectedGameMode === "stage") {
+    stageBossIndex++;
+
+    if (stageBossIndex >= bossTypes.length) {
+      endGame(true);
+      return;
+    }
+
+    spawnBoss(stageBossIndex);
+  }
 }
 
 function drawBosses() {
@@ -1625,9 +1751,10 @@ function damagePlayer(amount) {
   addFloatingText("HP -" + amount, player.x, player.y - 42, "#FF1744");
 }
 
-function endGame() {
+function endGame(cleared = false) {
   let survivalSeconds = getSurvivalSeconds();
   finalSurvivalSeconds = survivalSeconds;
+  finalGameResult = cleared ? "clear" : "dead";
 
   playerStats.highScore = max(playerStats.highScore, score);
   playerStats.maxSurvival = max(playerStats.maxSurvival, survivalSeconds);
@@ -1651,31 +1778,118 @@ function drawTitleScreen() {
 
   fill(255);
   textSize(42);
-  text("AI 小小殭屍倖存者", width / 2, 105);
+  text("AI 小小殭屍倖存者", width / 2, 92);
 
   fill(210);
   textSize(18);
-  text("p5.js Web Editor 示範版 v14 排版修正版", width / 2, 150);
+  text("p5.js Web Editor 示範版 v16 按鍵修正版", width / 2, 135);
 
   const charData = getSelectedCharacter();
 
   fill(255);
-  textSize(20);
-  text("目前角色：" + charData.name, width / 2, 210);
+  textSize(18);
+  text("目前角色：" + charData.name, width / 2, 185);
+
+  fill("#A8FF78");
+  textSize(16);
+  text("模式：" + getGameModeName() + "｜難度：" + getDifficultyName(), width / 2, 218);
 
   fill(190);
-  textSize(15);
-  text(charData.desc, width / 2, 238);
+  textSize(14);
+  text(charData.desc, width / 2, 246);
 
   drawButton(width / 2 - 140, 300, 280, 52, "Enter：開始遊戲");
-  drawButton(width / 2 - 140, 365, 280, 52, "C：選擇角色");
-  drawButton(width / 2 - 140, 430, 280, 52, "W：武器圖鑑");
-  drawButton(width / 2 - 140, 495, 280, 52, "Z：殭屍圖鑑");
+  drawButton(width / 2 - 140, 365, 280, 52, "M：模式 / 難度");
+  drawButton(width / 2 - 140, 430, 280, 52, "C：選擇角色");
+  drawButton(width / 2 - 140, 495, 280, 52, "W：武器圖鑑");
+  drawButton(width / 2 - 140, 560, 280, 52, "Z：殭屍圖鑑");
 
   fill(170);
+  textSize(13);
+  text("無盡：每擊殺 30 隻怪物隨機出 Boss，不會主動結束", width / 2, 660);
+  text("闖關：30 秒後依序出 Boss，打完一輪就勝利", width / 2, 686);
+  text("電腦：WASD / 方向鍵｜手機：左下角搖桿｜P 暫停", width / 2, 716);
+}
+
+function drawModeSelectScreen() {
+  drawGridBackground();
+
+  fill(255);
+  textAlign(CENTER, CENTER);
+  textSize(36);
+  text("模式 / 難度設定", width / 2, 60);
+
+  fill(190);
   textSize(14);
-  text("電腦：WASD / 方向鍵移動｜手機：左下角搖桿移動", width / 2, 610);
-  text("攻擊自動發射｜升級按 1 / 2 / 3 或點選｜R：清除存檔", width / 2, 638);
+  text("選擇本局規則。按 Enter 開始，按 B 回首頁。", width / 2, 96);
+
+  textAlign(LEFT, CENTER);
+  fill("#A8FF78");
+  textSize(22);
+  text("遊戲模式", 55, 145);
+
+  drawModeCard(55, 175, 230, 130, "endless", "無盡模式", "每擊殺 30 隻怪物，隨機出現 1 隻 Boss。沒有終點，撐越久越強。");
+  drawModeCard(315, 175, 230, 130, "stage", "闖關模式", "第一隻 Boss 在 30 秒後出現。打死後下一隻依序登場，打完一輪勝利。");
+
+  fill("#A8FF78");
+  textSize(22);
+  text("難度", 55, 360);
+
+  drawDifficultyButton(55, 395, 230, 58, "easy", "簡單");
+  drawDifficultyButton(315, 395, 230, 58, "normal", "中等");
+  drawDifficultyButton(55, 470, 230, 58, "hard", "困難");
+  drawDifficultyButton(315, 470, 230, 58, "extreme", "極難");
+
+  fill(220);
+  textSize(13);
+  textAlign(CENTER, CENTER);
+  text("難度會影響：怪物血量、速度、傷害、生成速度、Boss 強度", width / 2, 565);
+
+  drawButton(width / 2 - 180, 630, 360, 52, "開始遊戲");
+  drawButton(width / 2 - 180, 700, 360, 46, "回首頁");
+
+}
+
+function drawModeCard(x, y, w, h, mode, title, desc) {
+  let selected = selectedGameMode === mode;
+
+  fill(selected ? "#273B5E" : "#1E222E");
+  stroke(selected ? "#FFE66D" : "#6B7A99");
+  strokeWeight(2);
+  rect(x, y, w, h, 14);
+
+  noStroke();
+  fill(selected ? "#FFE66D" : "#FFFFFF");
+  textAlign(CENTER, CENTER);
+  textSize(20);
+  text(title, x + w / 2, y + 30);
+
+  fill(210);
+  textAlign(LEFT, TOP);
+  textSize(12.5);
+  drawWrappedText(desc, x + 18, y + 60, w - 36, 18, 3);
+
+  if (selected) {
+    fill("#A8FF78");
+    textAlign(CENTER, CENTER);
+    textSize(13);
+    text("已選擇", x + w / 2, y + h - 18);
+  }
+}
+
+function drawDifficultyButton(x, y, w, h, difficulty, label) {
+  let selected = selectedDifficulty === difficulty;
+
+  fill(selected ? "#273B5E" : "#1E222E");
+  stroke(selected ? "#A8FF78" : "#6B7A99");
+  strokeWeight(2);
+  rect(x, y, w, h, 12);
+
+  noStroke();
+  fill(selected ? "#A8FF78" : 240);
+  textAlign(CENTER, CENTER);
+  textSize(20);
+  text(label, x + w / 2, y + h / 2);
 }
 
 function drawCharacterScreen() {
@@ -2102,34 +2316,45 @@ function drawGameOverScreen() {
 
   textAlign(CENTER, CENTER);
 
-  fill("#FF6B6B");
-  textSize(46);
-  text("GAME OVER", width / 2, 115);
+  if (finalGameResult === "clear") {
+    fill("#A8FF78");
+    textSize(44);
+    text("闖關成功！", width / 2, 110);
+  } else {
+    fill("#FF6B6B");
+    textSize(46);
+    text("GAME OVER", width / 2, 110);
+  }
+
+  fill(230);
+  textSize(16);
+  text("模式：" + getGameModeName() + "｜難度：" + getDifficultyName(), width / 2, 155);
 
   fill(255);
   textSize(22);
-  text("本局分數：" + score, width / 2, 190);
-  text("存活時間：" + getSurvivalSeconds() + " 秒", width / 2, 225);
-  text("擊殺殭屍：" + kills, width / 2, 260);
-  text("擊敗 Boss：" + bossKillsThisRun, width / 2, 295);
+  text("本局分數：" + score, width / 2, 205);
+  text("存活時間：" + getSurvivalSeconds() + " 秒", width / 2, 240);
+  text("擊殺殭屍：" + kills, width / 2, 275);
+  text("擊敗 Boss：" + bossKillsThisRun, width / 2, 310);
 
   fill("#FFE66D");
   textSize(18);
-  text("最高分：" + playerStats.highScore + "｜最長存活：" + playerStats.maxSurvival + " 秒", width / 2, 350);
+  text("最高分：" + playerStats.highScore + "｜最長存活：" + playerStats.maxSurvival + " 秒", width / 2, 365);
 
   fill("#A8FF78");
   textSize(18);
   for (let i = 0; i < justUnlockedMessages.length; i++) {
-    text(justUnlockedMessages[i], width / 2, 392 + i * 28);
+    text(justUnlockedMessages[i], width / 2, 405 + i * 28);
   }
-
-  drawButton(width / 2 - 220, 600, 440, 48, "Enter：再玩一次");
-  drawButton(width / 2 - 220, 665, 440, 48, "C：角色選擇");
-  drawButton(width / 2 - 220, 730, 440, 48, "B：回首頁");
 
   fill(180);
   textSize(14);
   text("W：武器圖鑑｜Z：殭屍圖鑑", width / 2, 535);
+
+  drawButton(width / 2 - 220, 600, 440, 48, "Enter：再玩一次");
+  drawButton(width / 2 - 220, 665, 440, 48, "M：模式 / 難度");
+  drawButton(width / 2 - 220, 730, 440, 48, "C：角色選擇");
+  drawButton(width / 2 - 220, 795, 440, 42, "B：回首頁");
 }
 
 // ============================================================
@@ -2641,10 +2866,18 @@ function touchEnded() {
 // 十六、鍵盤與滑鼠操作
 // ============================================================
 
-function keyPressed() {
+function handleGameKey(rawKey, rawKeyCode) {
+  // v16：不要只依賴 p5 的 keyPressed，GitHub Pages 上有時 canvas 沒焦點會失效。
+  // 這裡同時支援 p5 keyPressed 與 window keydown。
+  let key = rawKey || "";
+  let keyCode = rawKeyCode || 0;
   if (gameState === "title") {
     if (keyCode === ENTER) {
       resetGame();
+    }
+
+    if (key === "m" || key === "M") {
+      gameState = "modeSelect";
     }
 
     if (key === "c" || key === "C") {
@@ -2708,6 +2941,10 @@ function keyPressed() {
       resetGame();
     }
 
+    if (key === "m" || key === "M") {
+      gameState = "modeSelect";
+    }
+
     if (key === "c" || key === "C") {
       gameState = "character";
     }
@@ -2732,6 +2969,37 @@ function keyPressed() {
       gameState = "character";
     }
   }
+}
+
+
+function keyPressed() {
+  handleGameKey(key, keyCode);
+  return false;
+}
+
+function setupGlobalKeyboardControls() {
+  // 避免重複掛監聽
+  if (window.__p5ZombieKeyboardReady) return;
+  window.__p5ZombieKeyboardReady = true;
+
+  window.addEventListener("keydown", function (event) {
+    // 避免按空白鍵、方向鍵、Enter、ESC 時網頁捲動或瀏覽器預設行為干擾遊戲
+    if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", " ", "Enter", "Escape"].includes(event.key)) {
+      event.preventDefault();
+    }
+
+    let mappedKey = event.key;
+    let mappedCode = event.keyCode || 0;
+
+    if (event.key === "Escape") mappedCode = ESCAPE;
+    if (event.key === "Enter") mappedCode = ENTER;
+    if (event.key === "ArrowLeft") mappedCode = LEFT_ARROW;
+    if (event.key === "ArrowRight") mappedCode = RIGHT_ARROW;
+    if (event.key === "ArrowUp") mappedCode = UP_ARROW;
+    if (event.key === "ArrowDown") mappedCode = DOWN_ARROW;
+
+    handleGameKey(mappedKey, mappedCode);
+  }, { passive: false });
 }
 
 function mousePressed() {
@@ -2766,21 +3034,69 @@ function handlePointerPressed(px, py) {
       return;
     }
 
-    // 點擊選擇角色
+    // 點擊模式 / 難度
     if (isPointInRect(px, py, width / 2 - 140, 365, 280, 52)) {
+      gameState = "modeSelect";
+      return;
+    }
+
+    // 點擊選擇角色
+    if (isPointInRect(px, py, width / 2 - 140, 430, 280, 52)) {
       gameState = "character";
       return;
     }
 
     // 點擊武器圖鑑
-    if (isPointInRect(px, py, width / 2 - 140, 430, 280, 52)) {
+    if (isPointInRect(px, py, width / 2 - 140, 495, 280, 52)) {
       gameState = "weaponDex";
       return;
     }
 
     // 點擊殭屍圖鑑
-    if (isPointInRect(px, py, width / 2 - 140, 495, 280, 52)) {
+    if (isPointInRect(px, py, width / 2 - 140, 560, 280, 52)) {
       gameState = "zombieDex";
+      return;
+    }
+  }
+
+  if (gameState === "modeSelect") {
+    if (isPointInRect(px, py, 55, 175, 230, 130)) {
+      selectedGameMode = "endless";
+      return;
+    }
+
+    if (isPointInRect(px, py, 315, 175, 230, 130)) {
+      selectedGameMode = "stage";
+      return;
+    }
+
+    if (isPointInRect(px, py, 55, 395, 230, 58)) {
+      selectedDifficulty = "easy";
+      return;
+    }
+
+    if (isPointInRect(px, py, 315, 395, 230, 58)) {
+      selectedDifficulty = "normal";
+      return;
+    }
+
+    if (isPointInRect(px, py, 55, 470, 230, 58)) {
+      selectedDifficulty = "hard";
+      return;
+    }
+
+    if (isPointInRect(px, py, 315, 470, 230, 58)) {
+      selectedDifficulty = "extreme";
+      return;
+    }
+
+    if (isPointInRect(px, py, width / 2 - 180, 630, 360, 52)) {
+      resetGame();
+      return;
+    }
+
+    if (isPointInRect(px, py, width / 2 - 180, 700, 360, 46)) {
+      gameState = "title";
       return;
     }
   }
@@ -2854,11 +3170,16 @@ function handlePointerPressed(px, py) {
     }
 
     if (isPointInRect(px, py, width / 2 - 220, 665, 440, 48)) {
-      gameState = "character";
+      gameState = "modeSelect";
       return;
     }
 
     if (isPointInRect(px, py, width / 2 - 220, 730, 440, 48)) {
+      gameState = "character";
+      return;
+    }
+
+    if (isPointInRect(px, py, width / 2 - 220, 795, 440, 42)) {
       gameState = "title";
       return;
     }
@@ -2909,7 +3230,7 @@ function randomEdgePosition() {
 }
 
 function getSurvivalSeconds() {
-  if (gameState === "title" || gameState === "character" || gameState === "weaponDex" || gameState === "zombieDex") return 0;
+  if (gameState === "title" || gameState === "modeSelect" || gameState === "character" || gameState === "weaponDex" || gameState === "zombieDex") return 0;
   if (gameState === "gameover") return finalSurvivalSeconds;
   return floor((millis() - startTime) / 1000);
 }
