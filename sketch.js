@@ -31,6 +31,7 @@ AI 輔助 p5.js 殭屍倖存者遊戲範例
 25. v14 修正：暫停按鈕避開武器資訊欄，武器圖鑑直版壓縮排版避免文字與回首頁按鈕重疊
 26. v15 新增：遊戲模式與難度系統。無盡模式每擊殺 30 隻怪物隨機出 Boss；闖關模式 30 秒後依序出 Boss，打完一輪勝利；難度分簡單、中等、困難、極難
 27. v16 修正：模式/難度頁 Enter、B 等鍵盤操作改用全域 keydown 監聽，避免 GitHub Pages 上 canvas 沒有焦點時按鍵失效
+28. v17 新增整合：角色專屬武器、攻擊特效、WebAudio 音效、小怪種類擴充、Boss 獨有攻擊、圖鑑更新、HUD 對齊優化
 */
 
 // ============================================================
@@ -54,6 +55,7 @@ let expGems = [];
 let bosses = [];
 let explosions = [];
 let floatingTexts = [];
+let gameEffects = []; // 專屬武器、Boss 技能、命中特效使用
 
 let score = 0;
 let kills = 0;
@@ -65,6 +67,7 @@ let lastEnemySpawn = 0;
 let lastAttackTime = 0;
 let lastAuraDamageTime = 0;
 let lastBombTime = 0;
+let lastCharacterWeaponTime = 0;
 let lastBossSpawnTime = 0;
 let bossSpawnCount = 0;
 
@@ -109,6 +112,13 @@ let virtualJoystick = {
 const MAX_FLOATING_TEXTS = 90;
 const MAX_BULLETS = 100;
 const MAX_BLOOD_STAINS = 160;
+const MAX_GAME_EFFECTS = 80;
+
+// WebAudio 音效，不需要額外上傳音檔。
+// 瀏覽器規定：第一次點擊或按鍵後才能啟動聲音。
+let audioCtx = null;
+let soundEnabled = true;
+let lastSoundAt = {};
 
 const difficultyConfigs = {
   easy: {
@@ -218,6 +228,18 @@ const characters = [
   }
 ];
 
+
+const characterWeapons = {
+  student: { name: "鉛筆風暴", desc: "每隔一段時間向附近多個敵人射出鉛筆，適合清理小怪。" },
+  runner: { name: "疾風衝擊", desc: "週期性釋放風壓衝擊波，擊退並傷害身邊敵人。" },
+  scientist: { name: "電漿連鎖", desc: "向最近敵人釋放電漿，會連鎖跳到其他敵人。" },
+  guardian: { name: "盾牌震波", desc: "釋放防禦震波，傷害周圍敵人並回復少量生命。" }
+};
+
+function getCharacterWeaponInfo() {
+  return characterWeapons[selectedCharacterId] || characterWeapons.student;
+}
+
 // ============================================================
 // 三、p5.js 初始化
 // ============================================================
@@ -238,17 +260,6 @@ function draw() {
     drawTitleScreen();
   } else if (gameState === "modeSelect") {
     drawModeSelectScreen();
-  } else if (gameState === "modeSelect") {
-    if (keyCode === ENTER) resetGame();
-    if (key === "b" || key === "B") gameState = "title";
-
-    if (key === "1") selectedGameMode = "endless";
-    if (key === "2") selectedGameMode = "stage";
-
-    if (key === "q" || key === "Q") selectedDifficulty = "easy";
-    if (key === "w" || key === "W") selectedDifficulty = "normal";
-    if (key === "e" || key === "E") selectedDifficulty = "hard";
-    if (key === "r" || key === "R") selectedDifficulty = "extreme";
   } else if (gameState === "character") {
     drawCharacterScreen();
   } else if (gameState === "playing") {
@@ -381,6 +392,7 @@ function resetGame() {
   bosses = [];
   explosions = [];
   floatingTexts = [];
+  gameEffects = [];
   bloodStains = [];
   upgradeOptions = [];
   selectedUpgrades = [];
@@ -395,6 +407,7 @@ function resetGame() {
   lastAttackTime = millis();
   lastAuraDamageTime = millis();
   lastBombTime = millis();
+  lastCharacterWeaponTime = millis();
   lastBossSpawnTime = millis();
   bossSpawnCount = 0;
   nextEndlessBossKillTarget = 30;
@@ -459,6 +472,7 @@ function updateGame() {
   updateBullets();
   updateWeapons();
   updateExplosions();
+  updateGameEffects();
   updateExpGems();
   updateFloatingTexts();
   checkPlayerHit();
@@ -486,6 +500,7 @@ function drawGame() {
   drawBullets();
   drawWeapons();
   drawExplosions();
+  drawGameEffects();
   drawFloatingTexts();
 
   pop();
@@ -701,6 +716,27 @@ function drawGuardianHero(mainColor) {
 // 八、殭屍系統
 // ============================================================
 
+
+const enemyTypes = [
+  { kind: "normal", name: "普通殭屍", color: "#55C667", hpMult: 1.0, speedMult: 1.0, damageMult: 1.0, rMin: 12, rMax: 18, desc: "最基本的敵人，會穩定追著玩家。" },
+  { kind: "small", name: "小殭屍", color: "#7FFF7F", hpMult: 0.55, speedMult: 1.45, damageMult: 0.75, rMin: 9, rMax: 12, desc: "速度快、血量少，常由 Boss 召喚或分裂。" },
+  { kind: "sprinter", name: "奔跑殭屍", color: "#A7F3D0", hpMult: 0.85, speedMult: 1.75, damageMult: 0.85, rMin: 11, rMax: 15, desc: "移動很快，會從側邊快速接近玩家。" },
+  { kind: "brute", name: "壯漢殭屍", color: "#2F855A", hpMult: 1.75, speedMult: 0.72, damageMult: 1.35, rMin: 17, rMax: 23, desc: "血量厚、速度慢，但碰到會更痛。" },
+  { kind: "toxic", name: "毒液殭屍", color: "#9AE66E", hpMult: 1.05, speedMult: 0.95, damageMult: 1.15, rMin: 13, rMax: 18, desc: "帶有毒液，靠近時威脅較高。" },
+  { kind: "bomber", name: "爆裂殭屍", color: "#F97316", hpMult: 0.9, speedMult: 1.05, damageMult: 1.0, rMin: 13, rMax: 17, desc: "死亡時會爆裂，玩家太靠近會受到傷害。" }
+];
+
+function pickEnemyType(small = false) {
+  if (small) return enemyTypes.find(e => e.kind === "small");
+  let survival = getSurvivalSeconds();
+  let pool = ["normal", "normal", "normal", "sprinter"];
+  if (survival > 25) pool.push("brute");
+  if (survival > 40) pool.push("toxic");
+  if (survival > 55) pool.push("bomber");
+  let key = random(pool);
+  return enemyTypes.find(e => e.kind === key) || enemyTypes[0];
+}
+
 function updateEnemySpawning() {
   let survival = getSurvivalSeconds();
   let cfg = getDifficultyConfig();
@@ -729,32 +765,33 @@ function getMaxEnemiesAllowed() {
 }
 
 function spawnEnemy(x = null, y = null, small = false) {
-  // v9 效能保護：
-  // 怪物數量隨時間增加，但有上限，避免手機或瀏覽器玩久後卡住。
   let maxEnemies = getMaxEnemiesAllowed();
-  if (enemies.length >= maxEnemies) {
-    return;
-  }
+  if (enemies.length >= maxEnemies) return;
 
   let pos = randomEdgePosition();
   let survival = getSurvivalSeconds();
   let cfg = getDifficultyConfig();
+  let type = pickEnemyType(small);
 
-  // v15：難度會影響怪物血量、速度與傷害。
-  let baseHp = small ? 10 : random(14, 24) + survival * 0.035;
-  baseHp *= cfg.enemyHp;
+  let baseHp = random(14, 24) + survival * 0.035;
+  baseHp *= cfg.enemyHp * type.hpMult;
+
+  let r = random(type.rMin, type.rMax);
 
   let enemy = {
     id: nextId++,
+    kind: type.kind,
+    name: type.name,
     x: x === null ? pos.x : x,
     y: y === null ? pos.y : y,
-    r: small ? 10 : random(12, 18),
+    r,
     hp: baseHp,
     maxHp: baseHp,
-    speed: (small ? random(1.6, 2.4) : random(0.9, 1.65)) * cfg.enemySpeed,
-    damage: ceil((small ? 8 : 10) * cfg.enemyDamage),
-    color: small ? "#7FFF7F" : "#55C667",
-    lastBladeHit: 0
+    speed: random(0.9, 1.65) * cfg.enemySpeed * type.speedMult,
+    damage: ceil(10 * cfg.enemyDamage * type.damageMult),
+    color: type.color,
+    lastBladeHit: 0,
+    lastSpecialTime: millis()
   };
 
   enemies.push(enemy);
@@ -784,22 +821,28 @@ function killEnemy(index) {
   score += 10;
 
   spawnBloodStain(e.x, e.y, e.r, false);
-  spawnExpGem(e.x, e.y, 1);
+  spawnExpGem(e.x, e.y, e.kind === "brute" ? 2 : 1);
   addFloatingText("分數 +10", e.x, e.y, "#FFD166");
+  playSound("kill");
+
+  if (e.kind === "bomber") {
+    addGameEffect({ type: "ring", x: e.x, y: e.y, r: 10, maxR: 82, life: 22, color: "#FB923C" });
+    if (dist(e.x, e.y, player.x, player.y) < 85) damagePlayer(12);
+  }
 
   enemies.splice(index, 1);
 }
 
 function drawEnemies() {
   for (let e of enemies) {
-    drawZombieBody(e.x, e.y, e.r, e.color, e.hp / e.maxHp);
+    drawZombieBody(e.x, e.y, e.r, e.color, e.hp / e.maxHp, e.kind);
 
     // 小血條
     drawMiniHpBar(e.x - e.r, e.y - e.r - 12, e.r * 2, 4, e.hp, e.maxHp);
   }
 }
 
-function drawZombieBody(x, y, r, colorValue, hpRatio) {
+function drawZombieBody(x, y, r, colorValue, hpRatio, kind = "normal") {
   push();
   translate(x, y);
 
@@ -840,6 +883,25 @@ function drawZombieBody(x, y, r, colorValue, hpRatio) {
   line(-r * 0.55, r * 0.2, -r * 1.0, r * 0.55);
   line(r * 0.55, r * 0.2, r * 1.0, r * 0.55);
 
+  // 不同小怪的簡單辨識造型
+  noStroke();
+  if (kind === "sprinter") {
+    fill("#E0F2FE");
+    triangle(-r * 0.25, -r * 1.25, r * 0.25, -r * 1.25, 0, -r * 0.85);
+  } else if (kind === "brute") {
+    fill("#1F2937");
+    rect(-r * 0.55, -r * 1.05, r * 1.1, r * 0.25, 3);
+  } else if (kind === "toxic") {
+    fill("#B6FF4D");
+    circle(-r * 0.45, -r * 0.95, r * 0.25);
+    circle(r * 0.45, -r * 0.95, r * 0.25);
+  } else if (kind === "bomber") {
+    fill("#FACC15");
+    circle(0, -r * 1.05, r * 0.38);
+    fill("#7C2D12");
+    circle(0, -r * 1.05, r * 0.18);
+  }
+
   // 血量低時顏色稍微變暗
   if (hpRatio < 0.35) {
     noStroke();
@@ -862,7 +924,7 @@ const bossTypes = [
     maxHp: 320,
     speed: 0.75,
     r: 34,
-    desc: "血很多，慢慢追玩家"
+    desc: "血很多，會定期踩地板產生震波，近距離會被重擊。"
   },
   {
     kind: "dasher",
@@ -871,7 +933,7 @@ const bossTypes = [
     maxHp: 230,
     speed: 1.0,
     r: 28,
-    desc: "每隔幾秒突然加速"
+    desc: "每隔幾秒突然衝刺，衝刺路徑會留下危險殘影。"
   },
   {
     kind: "splitter",
@@ -880,7 +942,7 @@ const bossTypes = [
     maxHp: 260,
     speed: 0.95,
     r: 30,
-    desc: "死亡後分裂成小怪"
+    desc: "死亡後分裂成小怪，戰鬥中也會週期性裂殖小殭屍。"
   },
   {
     kind: "summoner",
@@ -889,7 +951,7 @@ const bossTypes = [
     maxHp: 240,
     speed: 0.85,
     r: 29,
-    desc: "會召喚小殭屍"
+    desc: "會召喚小殭屍，並在玩家附近放出召喚圈干擾走位。"
   }
 ];
 
@@ -924,46 +986,26 @@ const weaponDexEntries = [
     key: "lifesteal",
     desc: "攻擊命中敵人時有機率回復生命，等級越高回復越穩定。",
     unlock: "升級時選到「吸血之牙」"
+  },
+  {
+    name: "角色專屬武器",
+    key: "unique",
+    desc: "每個角色都有不同自動特效攻擊：鉛筆風暴、疾風衝擊、電漿連鎖、盾牌震波。",
+    unlock: "選擇角色後自動擁有"
   }
 ];
 
 const zombieDexEntries = [
-  {
-    name: "普通殭屍",
-    key: "normal",
-    desc: "最常見的敵人，會慢慢追著玩家跑。",
-    type: "enemy"
-  },
-  {
-    name: "小殭屍",
-    key: "small",
-    desc: "體型小、速度較快，通常由 Boss 召喚或分裂產生。",
-    type: "enemy"
-  },
-  {
-    name: "巨大殭屍王",
-    key: "tank",
-    desc: "血量很多，移動慢，但碰到玩家會很痛。",
-    type: "boss"
-  },
-  {
-    name: "衝刺怪",
-    key: "dasher",
-    desc: "平常速度普通，但每隔幾秒會突然衝刺。",
-    type: "boss"
-  },
-  {
-    name: "分裂怪",
-    key: "splitter",
-    desc: "被打倒後會分裂出多隻小殭屍。",
-    type: "boss"
-  },
-  {
-    name: "召喚師",
-    key: "summoner",
-    desc: "會定期召喚小殭屍干擾玩家。",
-    type: "boss"
-  }
+  { name: "普通殭屍", key: "normal", desc: "最常見的敵人，能力平均，會穩定追著玩家。", type: "enemy" },
+  { name: "小殭屍", key: "small", desc: "體型小、速度快，常由 Boss 召喚或分裂產生。", type: "enemy" },
+  { name: "奔跑殭屍", key: "sprinter", desc: "移動速度很快，適合從側邊包圍玩家。", type: "enemy" },
+  { name: "壯漢殭屍", key: "brute", desc: "血量厚、速度慢，但碰撞傷害比較高。", type: "enemy" },
+  { name: "毒液殭屍", key: "toxic", desc: "帶有毒液，傷害略高，外觀有綠色毒泡。", type: "enemy" },
+  { name: "爆裂殭屍", key: "bomber", desc: "死亡時會爆裂，玩家靠太近會受到額外傷害。", type: "enemy" },
+  { name: "巨大殭屍王", key: "tank", desc: "血量很多，會定期震地重踏，近距離玩家會受到傷害。", type: "boss" },
+  { name: "衝刺怪", key: "dasher", desc: "會突然向玩家衝刺，衝刺路徑會出現紫色殘影。", type: "boss" },
+  { name: "分裂怪", key: "splitter", desc: "死亡後分裂成小怪，戰鬥中也會週期性裂殖。", type: "boss" },
+  { name: "召喚師", key: "summoner", desc: "會定期召喚小殭屍，並在玩家附近放出召喚圈。", type: "boss" }
 ];
 
 function updateBossSpawning() {
@@ -1021,6 +1063,7 @@ function spawnBoss(typeIndex = null) {
   };
 
   bosses.push(boss);
+  playSound("boss");
 
   let modeText = selectedGameMode === "stage" ? "闖關 Boss " + (stageBossIndex + 1) + "：" : "無盡 Boss：";
   addFloatingText(modeText + boss.name, player.x, player.y - 120, "#FF6B6B");
@@ -1034,7 +1077,9 @@ function updateBosses() {
       if (millis() - b.lastSkillTime > 4200) {
         b.dashUntil = millis() + 700;
         b.lastSkillTime = millis();
+        addGameEffect({ type: "line", x1: b.x, y1: b.y, x2: player.x, y2: player.y, life: 18, color: "#E0B0FF" });
         addFloatingText("衝刺！", b.x, b.y - 45, "#E0B0FF");
+        playSound("bossSkill");
       }
 
       if (millis() < b.dashUntil) {
@@ -1047,9 +1092,28 @@ function updateBosses() {
         for (let i = 0; i < 3; i++) {
           spawnEnemy(b.x + random(-35, 35), b.y + random(-35, 35), true);
         }
+        addGameEffect({ type: "ring", x: player.x + random(-80, 80), y: player.y + random(-80, 80), r: 10, maxR: 95, life: 30, color: "#38BDF8" });
         b.lastSkillTime = millis();
-        addFloatingText("召喚小怪！", b.x, b.y - 45, "#87CEFA");
+        addFloatingText("召喚法陣！", b.x, b.y - 45, "#87CEFA");
+        playSound("bossSkill");
       }
+    }
+
+    if (b.kind === "tank" && millis() - b.lastSkillTime > 5600) {
+      b.lastSkillTime = millis();
+      addGameEffect({ type: "ring", x: b.x, y: b.y, r: 20, maxR: 190, life: 35, color: "#FF6B6B" });
+      addFloatingText("震地重踏！", b.x, b.y - 45, "#FF6B6B");
+      if (dist(b.x, b.y, player.x, player.y) < 190) damagePlayer(16);
+      playSound("bossSkill");
+    }
+
+    if (b.kind === "splitter" && millis() - b.lastSkillTime > 7000) {
+      b.lastSkillTime = millis();
+      for (let i = 0; i < 2; i++) {
+        spawnEnemy(b.x + random(-38, 38), b.y + random(-38, 38), true);
+      }
+      addFloatingText("裂殖！", b.x, b.y - 45, "#FDBA74");
+      playSound("bossSkill");
     }
 
     actualSpeed *= constrain(1 + getSurvivalSeconds() * 0.0025, 1, 1.55);
@@ -1332,12 +1396,121 @@ function updateWeapons() {
   updateAuraWeapon();
   updateBladeWeapon();
   updateBombWeapon();
+  updateCharacterWeapon();
 }
 
 function drawWeapons() {
   drawAuraWeapon();
   drawBladeWeapon();
 }
+
+
+function updateCharacterWeapon() {
+  let cooldown = 5600;
+  if (selectedCharacterId === "runner") cooldown = 4600;
+  if (selectedCharacterId === "scientist") cooldown = 5200;
+  if (selectedCharacterId === "guardian") cooldown = 6200;
+  if (millis() - lastCharacterWeaponTime < cooldown) return;
+  lastCharacterWeaponTime = millis();
+
+  if (selectedCharacterId === "student") castStudentPencilStorm();
+  else if (selectedCharacterId === "runner") castRunnerWindPulse();
+  else if (selectedCharacterId === "scientist") castScientistPlasmaChain();
+  else if (selectedCharacterId === "guardian") castGuardianShieldWave();
+}
+
+function getAllTargets() { return enemies.concat(bosses); }
+function getTargetsNear(x, y, radius) { return getAllTargets().filter(t => dist(x, y, t.x, t.y) <= radius + t.r); }
+
+function castStudentPencilStorm() {
+  let targets = getTargetsNear(player.x, player.y, 260).sort((a,b)=>dist(player.x,player.y,a.x,a.y)-dist(player.x,player.y,b.x,b.y)).slice(0,5);
+  if (targets.length === 0) return;
+  for (let t of targets) {
+    applyDamageToTarget(t, player.bulletDamage * 0.9 + 10, "#FDE68A");
+    addGameEffect({ type: "line", x1: player.x, y1: player.y, x2: t.x, y2: t.y, life: 18, color: "#FDE68A" });
+  }
+  addFloatingText("鉛筆風暴！", player.x, player.y - 80, "#FDE68A");
+  playSound("unique");
+}
+
+function castRunnerWindPulse() {
+  let radius = 150;
+  let targets = getTargetsNear(player.x, player.y, radius);
+  for (let t of targets) {
+    applyDamageToTarget(t, 18 + player.level * 1.2, "#93C5FD");
+    let a = atan2(t.y - player.y, t.x - player.x);
+    t.x += cos(a) * 18;
+    t.y += sin(a) * 18;
+  }
+  addGameEffect({ type: "ring", x: player.x, y: player.y, r: 25, maxR: radius, life: 24, color: "#93C5FD" });
+  addFloatingText("疾風衝擊！", player.x, player.y - 80, "#93C5FD");
+  playSound("unique");
+}
+
+function castScientistPlasmaChain() {
+  let targets = getTargetsNear(player.x, player.y, 330).sort((a,b)=>dist(player.x,player.y,a.x,a.y)-dist(player.x,player.y,b.x,b.y)).slice(0,5);
+  if (targets.length === 0) return;
+  let lastX = player.x, lastY = player.y;
+  for (let t of targets) {
+    applyDamageToTarget(t, player.bulletDamage * 0.75 + 12, "#7DD3FC");
+    addGameEffect({ type: "line", x1: lastX, y1: lastY, x2: t.x, y2: t.y, life: 22, color: "#7DD3FC" });
+    lastX = t.x; lastY = t.y;
+  }
+  addFloatingText("電漿連鎖！", player.x, player.y - 80, "#7DD3FC");
+  playSound("unique");
+}
+
+function castGuardianShieldWave() {
+  let radius = 170;
+  for (let t of getTargetsNear(player.x, player.y, radius)) {
+    applyDamageToTarget(t, 20 + player.maxHp * 0.05, "#D1D5DB");
+  }
+  healPlayer(4 + floor(player.level / 2), "盾牌 +");
+  addGameEffect({ type: "ring", x: player.x, y: player.y, r: 30, maxR: radius, life: 32, color: "#D1D5DB" });
+  addFloatingText("盾牌震波！", player.x, player.y - 80, "#D1D5DB");
+  playSound("unique");
+}
+
+function addGameEffect(effect) {
+  gameEffects.push(effect);
+  if (gameEffects.length > MAX_GAME_EFFECTS) gameEffects.splice(0, gameEffects.length - MAX_GAME_EFFECTS);
+}
+function updateGameEffects() {
+  for (let ef of gameEffects) { ef.life--; if (ef.type === "ring") ef.r = lerp(ef.r, ef.maxR, 0.22); }
+  for (let i = gameEffects.length - 1; i >= 0; i--) if (gameEffects[i].life <= 0) gameEffects.splice(i, 1);
+}
+function drawGameEffects() {
+  push(); noFill();
+  for (let ef of gameEffects) {
+    let alpha = map(ef.life, 0, 35, 0, 210);
+    if (ef.type === "ring") { strokeWithAlpha(ef.color, alpha); strokeWeight(4); circle(ef.x, ef.y, ef.r * 2); }
+    else if (ef.type === "line") { strokeWithAlpha(ef.color, alpha); strokeWeight(4); line(ef.x1, ef.y1, ef.x2, ef.y2); stroke(255, 255, 255, alpha * 0.5); strokeWeight(1.5); line(ef.x1, ef.y1, ef.x2, ef.y2); }
+  }
+  pop();
+}
+function strokeWithAlpha(hexColor, alpha) { let c = color(hexColor); c.setAlpha(alpha); stroke(c); }
+
+function initAudio() {
+  if (!soundEnabled || audioCtx) return;
+  try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { soundEnabled = false; }
+}
+function playSound(type) {
+  if (!soundEnabled || !audioCtx) return;
+  let now = millis();
+  if (lastSoundAt[type] && now - lastSoundAt[type] < 80) return;
+  lastSoundAt[type] = now;
+  let cfg = { hit:[180,0.035,"square"], kill:[260,0.045,"triangle"], exp:[520,0.035,"sine"], level:[720,0.08,"sine"], hurt:[110,0.08,"sawtooth"], boss:[95,0.18,"sawtooth"], bossSkill:[150,0.09,"square"], unique:[640,0.075,"triangle"] }[type] || [440,0.04,"sine"];
+  let osc = audioCtx.createOscillator();
+  let gain = audioCtx.createGain();
+  osc.type = cfg[2];
+  osc.frequency.setValueAtTime(cfg[0], audioCtx.currentTime);
+  osc.frequency.exponentialRampToValueAtTime(max(40, cfg[0]*0.55), audioCtx.currentTime + cfg[1]);
+  gain.gain.setValueAtTime(0.0001, audioCtx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.06, audioCtx.currentTime + 0.01);
+  gain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + cfg[1]);
+  osc.connect(gain); gain.connect(audioCtx.destination); osc.start(); osc.stop(audioCtx.currentTime + cfg[1] + 0.02);
+}
+
 
 function updateAuraWeapon() {
   if (player.auraLevel <= 0) return;
@@ -1481,6 +1654,7 @@ function drawExplosions() {
 
 function applyDamageToTarget(target, amount, colorValue = "#FF4D4D") {
   target.hp -= amount;
+  playSound("hit");
 
   // v9：同一個目標短時間內不要一直產生跳字，避免玩久卡住。
   if (!target.lastDamageTextTime || millis() - target.lastDamageTextTime > 120) {
@@ -1563,6 +1737,7 @@ function drawExpGems() {
 function gainExp(amount) {
   player.exp += amount;
   addFloatingText("EXP +" + amount, player.x, player.y - 34, "#5EEAD4");
+  playSound("exp");
 
   while (player.exp >= player.nextExp) {
     player.exp -= player.nextExp;
@@ -1575,6 +1750,7 @@ function gainExp(amount) {
 
 function openUpgradeMenu() {
   upgradeOptions = createUpgradeOptions();
+  playSound("level");
   gameState = "upgrade";
 }
 
@@ -1749,6 +1925,7 @@ function damagePlayer(amount) {
   player.hp -= amount;
   player.invincibleUntil = millis() + 700;
   addFloatingText("HP -" + amount, player.x, player.y - 42, "#FF1744");
+  playSound("hurt");
 }
 
 function endGame(cleared = false) {
@@ -1782,7 +1959,7 @@ function drawTitleScreen() {
 
   fill(210);
   textSize(18);
-  text("p5.js Web Editor 示範版 v16 按鍵修正版", width / 2, 135);
+  text("p5.js Web Editor 示範版 v17 整合優化版", width / 2, 135);
 
   const charData = getSelectedCharacter();
 
@@ -1963,12 +2140,12 @@ function drawWeaponDexScreen() {
   textSize(13);
   text("目前遊戲中的武器。按 B 回首頁，按 C 選角色。", width / 2, 74);
 
-  // v14：直版壓縮排版，5 個武器都能完整放進 600x900。
+  // v17：6 個武器壓縮顯示。
   let cardW = 520;
-  let cardH = 112;
+  let cardH = 94;
   let startX = width / 2 - cardW / 2;
-  let startY = 105;
-  let gapY = 126;
+  let startY = 98;
+  let gapY = 106;
 
   for (let i = 0; i < weaponDexEntries.length; i++) {
     let item = weaponDexEntries[i];
@@ -1976,20 +2153,20 @@ function drawWeaponDexScreen() {
     let y = startY + i * gapY;
 
     drawDexCard(x, y, cardW, cardH);
-    drawWeaponIcon(item.key, x + 55, y + 58, 0.85);
+    drawWeaponIcon(item.key, x + 52, y + 48, 0.75);
 
     fill(255);
     textAlign(LEFT, TOP);
     textSize(19);
-    text(item.name, x + 108, y + 17);
+    text(item.name, x + 100, y + 13);
 
     fill(210);
     textSize(12.5);
-    drawWrappedText(item.desc, x + 108, y + 46, cardW - 130, 18, 2);
+    drawWrappedText(item.desc, x + 100, y + 39, cardW - 120, 16, 2);
 
     fill("#A8FF78");
     textSize(12.5);
-    drawWrappedText("取得方式：" + item.unlock, x + 108, y + 82, cardW - 130, 17, 1);
+    drawWrappedText("取得方式：" + item.unlock, x + 100, y + 70, cardW - 120, 15, 1);
   }
 
   drawButton(width / 2 - 120, 792, 240, 42, "B：回首頁");
@@ -2000,12 +2177,12 @@ function drawZombieDexScreen() {
 
   fill(255);
   textAlign(CENTER, CENTER);
-  textSize(36);
-  text("殭屍圖鑑", width / 2, 42);
+  textSize(34);
+  text("殭屍圖鑑", width / 2, 40);
 
   fill(190);
-  textSize(14);
-  text("一般怪物與 BOSS 分區整理。按 B 回首頁，按 C 選角色。", width / 2, 75);
+  textSize(13);
+  text("小怪與 BOSS 分區整理。按 B 回首頁，按 C 選角色。", width / 2, 70);
 
   let normalEnemies = zombieDexEntries.filter(item => item.type === "enemy");
   let bossEnemies = zombieDexEntries.filter(item => item.type === "boss");
@@ -2013,59 +2190,49 @@ function drawZombieDexScreen() {
   let cardW = 520;
   let startX = width / 2 - cardW / 2;
 
-  // 普通殭屍區
-  drawDexSectionTitle("普通殭屍", 112);
+  drawDexSectionTitle("小怪種類", 102);
 
   for (let i = 0; i < normalEnemies.length; i++) {
     let item = normalEnemies[i];
     let x = startX;
-    let y = 138 + i * 105;
+    let y = 124 + i * 63;
 
-    drawDexCard(x, y, cardW, 92);
-
-    let rr = item.key === "small" ? 13 : 18;
-    drawZombieBody(x + 55, y + 50, rr, item.key === "small" ? "#7FFF7F" : "#55C667", 1);
+    drawDexCard(x, y, cardW, 54);
+    let type = enemyTypes.find(e => e.kind === item.key) || enemyTypes[0];
+    drawZombieBody(x + 42, y + 32, 12, type.color, 1, item.key);
 
     fill(255);
     textAlign(LEFT, TOP);
-    textSize(19);
-    text(item.name, x + 108, y + 18);
+    textSize(15);
+    text(item.name, x + 78, y + 8);
 
     fill(210);
-    textSize(13);
-    drawWrappedText(item.desc, x + 108, y + 48, cardW - 135, 19, 2);
+    textSize(11.5);
+    drawWrappedText(item.desc, x + 78, y + 28, cardW - 100, 14, 2);
   }
 
-  // BOSS 區
-  drawDexSectionTitle("BOSS", 360);
+  drawDexSectionTitle("BOSS 獨有攻擊", 522);
 
   for (let i = 0; i < bossEnemies.length; i++) {
     let item = bossEnemies[i];
     let x = startX;
-    let y = 388 + i * 92;
+    let y = 544 + i * 66;
 
-    drawDexCard(x, y, cardW, 78);
-
+    drawDexCard(x, y, cardW, 58);
     let type = bossTypes.find(b => b.kind === item.key);
-    drawBossBody({
-      x: x + 55,
-      y: y + 45,
-      r: 19,
-      kind: item.key,
-      color: type ? type.color : "#B34747"
-    });
+    drawBossBody({ x: x + 44, y: y + 34, r: 14, kind: item.key, color: type ? type.color : "#B34747" });
 
     fill(255);
     textAlign(LEFT, TOP);
-    textSize(18);
-    text(item.name, x + 108, y + 12);
+    textSize(15);
+    text(item.name, x + 82, y + 8);
 
     fill(210);
-    textSize(13);
-    drawWrappedText(item.desc, x + 108, y + 40, cardW - 135, 18, 2);
+    textSize(11.5);
+    drawWrappedText(item.desc, x + 82, y + 29, cardW - 105, 14, 2);
   }
 
-  drawButton(width / 2 - 120, 792, 240, 42, "B：回首頁");
+  drawButton(width / 2 - 120, 820, 240, 42, "B：回首頁");
 }
 
 function drawDexSectionTitle(title, y) {
@@ -2174,9 +2341,27 @@ function drawWeaponIcon(kind, x, y, level) {
     triangle(7, -8, 1, 8, 12, 8);
     fill("#F43F5E");
     circle(0, -2, 10);
+  } else if (kind === "unique") {
+    noFill();
+    stroke("#FDE68A");
+    strokeWeight(4);
+    starShape(0, 0, 14, 28, 5);
+    noStroke();
+    fill("#A8FF78");
+    circle(0, 0, 10);
   }
 
   pop();
+}
+
+function starShape(x, y, r1, r2, points) {
+  beginShape();
+  for (let i = 0; i < points * 2; i++) {
+    let a = -HALF_PI + i * PI / points;
+    let r = i % 2 === 0 ? r2 : r1;
+    vertex(x + cos(a) * r, y + sin(a) * r);
+  }
+  endShape(CLOSE);
 }
 
 function drawPauseScreen() {
@@ -2372,39 +2557,42 @@ function getWeaponStatusLines() {
 }
 
 function getWeaponPanelHeight() {
-  return 38 + getWeaponStatusLines().length * 22;
+  return 38 + getWeaponStatusLines().length * 21 + 46;
 }
 
 function drawHUD() {
   let survival = getSurvivalSeconds();
 
-  // 左上：主要資訊
-  fill(0, 0, 0, 150);
+  // 左上：主要資訊。v17 改成欄位式排版，避免中文字看起來沒對齊。
+  fill(0, 0, 0, 155);
   noStroke();
-  rect(12, 12, 292, 168, 12);
+  rect(12, 12, 300, 188, 12);
 
   fill(255);
   textAlign(LEFT, TOP);
   textSize(15);
-  text("HP", 26, 25);
-  drawBar(65, 25, 205, 15, player.hp, player.maxHp, "#FF6B6B", true);
+  text("HP", 26, 24);
+  drawBar(68, 23, 210, 16, player.hp, player.maxHp, "#FF6B6B", true);
 
-  fill(255);
-  text("LV：" + player.level, 26, 55);
-  text("EXP：" + floor(player.exp) + " / " + player.nextExp, 26, 80);
-  text("分數：" + score, 26, 105);
-  text("擊殺：" + kills, 26, 130);
-  text("時間：" + survival + " 秒", 140, 130);
+  drawHudRow("LV", player.level, 54);
+  drawHudRow("EXP", floor(player.exp) + " / " + player.nextExp, 78);
+  drawHudRow("分數", score, 102);
+  drawHudRow("擊殺", kills, 126);
+  drawHudRow("時間", survival + " 秒", 150);
 
-  // 右上：武器資訊，放寬面板，避免文字跑出框外
+  fill(170);
+  textSize(11);
+  textAlign(LEFT, TOP);
+  text(getGameModeName() + "｜" + getDifficultyName(), 26, 174);
+
+  // 右上：武器資訊
   let weaponLines = getWeaponStatusLines();
-
   let panelX = 318;
   let panelY = 12;
   let panelW = width - panelX - 12;
   let panelH = getWeaponPanelHeight();
 
-  fill(0, 0, 0, 150);
+  fill(0, 0, 0, 155);
   rect(panelX, panelY, panelW, panelH, 12);
 
   fill(255);
@@ -2413,13 +2601,24 @@ function drawHUD() {
   text("武器狀態", panelX + 15, panelY + 12);
 
   for (let i = 0; i < weaponLines.length; i++) {
-    text(weaponLines[i], panelX + 15, panelY + 38 + i * 22);
+    text(weaponLines[i], panelX + 15, panelY + 38 + i * 21);
   }
 
-  // 暫停按鈕
-  if (gameState === "playing") {
-    drawPauseButton();
-  }
+  let uniqueInfo = getCharacterWeaponInfo();
+  fill("#FDE68A");
+  textSize(12);
+  drawWrappedText("專武：" + uniqueInfo.name, panelX + 15, panelY + 42 + weaponLines.length * 21, panelW - 28, 16, 2);
+
+  if (gameState === "playing") drawPauseButton();
+}
+
+function drawHudRow(label, value, y) {
+  fill(255);
+  textAlign(LEFT, TOP);
+  textSize(13);
+  text(label, 26, y);
+  textAlign(LEFT, TOP);
+  text(String(value), 86, y);
 }
 
 function getPauseButtonRect() {
@@ -2867,110 +3066,59 @@ function touchEnded() {
 // ============================================================
 
 function handleGameKey(rawKey, rawKeyCode) {
-  // v16：不要只依賴 p5 的 keyPressed，GitHub Pages 上有時 canvas 沒焦點會失效。
-  // 這裡同時支援 p5 keyPressed 與 window keydown。
+  initAudio();
+
   let key = rawKey || "";
   let keyCode = rawKeyCode || 0;
+
   if (gameState === "title") {
-    if (keyCode === ENTER) {
-      resetGame();
-    }
-
-    if (key === "m" || key === "M") {
-      gameState = "modeSelect";
-    }
-
-    if (key === "c" || key === "C") {
-      gameState = "character";
-    }
-
-    if (key === "w" || key === "W") {
-      gameState = "weaponDex";
-    }
-
-    if (key === "z" || key === "Z") {
-      gameState = "zombieDex";
-    }
-
-    if (key === "r" || key === "R") {
-      resetSaveData();
-    }
+    if (keyCode === ENTER) resetGame();
+    if (key === "m" || key === "M") gameState = "modeSelect";
+    if (key === "c" || key === "C") gameState = "character";
+    if (key === "w" || key === "W") gameState = "weaponDex";
+    if (key === "z" || key === "Z") gameState = "zombieDex";
+    if (key === "r" || key === "R") resetSaveData();
+  } else if (gameState === "modeSelect") {
+    if (keyCode === ENTER) resetGame();
+    if (key === "b" || key === "B") gameState = "title";
+    if (key === "1") selectedGameMode = "endless";
+    if (key === "2") selectedGameMode = "stage";
+    if (key === "q" || key === "Q") selectedDifficulty = "easy";
+    if (key === "w" || key === "W") selectedDifficulty = "normal";
+    if (key === "e" || key === "E") selectedDifficulty = "hard";
+    if (key === "r" || key === "R") selectedDifficulty = "extreme";
   } else if (gameState === "character") {
-    if (keyCode === ENTER) {
-      resetGame();
-    }
-
-    if (key === "b" || key === "B") {
-      gameState = "title";
-    }
-
-    if (key === "w" || key === "W") {
-      gameState = "weaponDex";
-    }
-
-    if (key === "z" || key === "Z") {
-      gameState = "zombieDex";
-    }
-
+    if (keyCode === ENTER) resetGame();
+    if (key === "b" || key === "B") gameState = "title";
+    if (key === "w" || key === "W") gameState = "weaponDex";
+    if (key === "z" || key === "Z") gameState = "zombieDex";
     let n = int(key);
     if (n >= 1 && n <= characters.length) {
       let c = characters[n - 1];
-      if (unlockedCharacters[c.id]) {
-        selectedCharacterId = c.id;
-        saveData();
-      }
+      if (unlockedCharacters[c.id]) { selectedCharacterId = c.id; saveData(); }
     }
   } else if (gameState === "playing") {
-    if (key === "p" || key === "P" || keyCode === ESCAPE) {
-      gameState = "paused";
-    }
+    if (key === "p" || key === "P" || keyCode === ESCAPE) gameState = "paused";
   } else if (gameState === "upgrade") {
     if (key === "1") chooseUpgrade(0);
     if (key === "2") chooseUpgrade(1);
     if (key === "3") chooseUpgrade(2);
     if (keyCode === ENTER) chooseUpgrade(0);
   } else if (gameState === "paused") {
-    if (key === "p" || key === "P" || keyCode === ESCAPE || keyCode === ENTER) {
-      gameState = "playing";
-    }
-    if (key === "b" || key === "B") {
-      gameState = "title";
-    }
+    if (key === "p" || key === "P" || keyCode === ESCAPE || keyCode === ENTER) gameState = "playing";
+    if (key === "b" || key === "B") gameState = "title";
   } else if (gameState === "gameover") {
-    if (keyCode === ENTER) {
-      resetGame();
-    }
-
-    if (key === "m" || key === "M") {
-      gameState = "modeSelect";
-    }
-
-    if (key === "c" || key === "C") {
-      gameState = "character";
-    }
-
-    if (key === "b" || key === "B") {
-      gameState = "title";
-    }
-
-    if (key === "w" || key === "W") {
-      gameState = "weaponDex";
-    }
-
-    if (key === "z" || key === "Z") {
-      gameState = "zombieDex";
-    }
+    if (keyCode === ENTER) resetGame();
+    if (key === "m" || key === "M") gameState = "modeSelect";
+    if (key === "c" || key === "C") gameState = "character";
+    if (key === "b" || key === "B") gameState = "title";
+    if (key === "w" || key === "W") gameState = "weaponDex";
+    if (key === "z" || key === "Z") gameState = "zombieDex";
   } else if (gameState === "weaponDex" || gameState === "zombieDex") {
-    if (key === "b" || key === "B") {
-      gameState = "title";
-    }
-
-    if (key === "c" || key === "C") {
-      gameState = "character";
-    }
+    if (key === "b" || key === "B") gameState = "title";
+    if (key === "c" || key === "C") gameState = "character";
   }
 }
-
 
 function keyPressed() {
   handleGameKey(key, keyCode);
@@ -3007,6 +3155,7 @@ function mousePressed() {
 }
 
 function handlePointerPressed(px, py) {
+  initAudio();
   if (gameState === "playing") {
     let btn = getPauseButtonRect();
     if (isPointInRect(px, py, btn.x, btn.y, btn.w, btn.h)) {
@@ -3185,8 +3334,15 @@ function handlePointerPressed(px, py) {
     }
   }
 
-  if (gameState === "weaponDex" || gameState === "zombieDex") {
+  if (gameState === "weaponDex") {
     if (isPointInRect(px, py, width / 2 - 120, 792, 240, 42)) {
+      gameState = "title";
+      return;
+    }
+  }
+
+  if (gameState === "zombieDex") {
+    if (isPointInRect(px, py, width / 2 - 120, 820, 240, 42)) {
       gameState = "title";
       return;
     }
