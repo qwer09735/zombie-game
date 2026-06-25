@@ -20,6 +20,7 @@ AI 輔助 p5.js 殭屍倖存者遊戲範例
 14. 無邊際地圖：玩家不受畫面邊界限制，鏡頭會跟著玩家移動
 15. v4 修正：無邊際地圖下，子彈不再用畫布邊界刪除，避免跑遠後自動攻擊失效
 16. v5 新增：Game Over 後存活時間停止、選角頁可直接開始、武器圖鑑、殭屍圖鑑
+17. v6 新增：手機觸控操作，左下角虛擬搖桿，頁面避免滑動，適合上傳 GitHub Pages 後用手機玩
 */
 
 // ============================================================
@@ -71,6 +72,18 @@ let bloodStains = [];
 // 玩家可以一直走，鏡頭會跟著玩家，因此地圖看起來是無邊際的。
 let cameraX = 0;
 let cameraY = 0;
+
+// 手機觸控用虛擬搖桿
+let virtualJoystick = {
+  active: false,
+  baseX: 95,
+  baseY: 505,
+  knobX: 95,
+  knobY: 505,
+  dx: 0,
+  dy: 0,
+  r: 58
+};
 
 let nextId = 1;
 
@@ -131,6 +144,7 @@ const characters = [
 
 function setup() {
   createCanvas(900, 600);
+  pixelDensity(1); // 手機效能比較穩
   textFont("Arial");
   createEnvironmentDetails();
   loadSaveData();
@@ -343,9 +357,10 @@ function drawGame() {
 
   pop();
 
-  // Boss 頂部血條與 HUD 都是固定在螢幕上的，所以不要受到鏡頭影響
+  // Boss 頂部血條、HUD、手機搖桿都是固定在螢幕上的，所以不要受到鏡頭影響
   drawBossTopHpBar();
   drawHUD();
+  drawMobileControls();
 }
 
 // ============================================================
@@ -360,6 +375,11 @@ function updatePlayer() {
   if (keyIsDown(RIGHT_ARROW) || keyIsDown(68)) dx += 1; // D
   if (keyIsDown(UP_ARROW) || keyIsDown(87)) dy -= 1;    // W
   if (keyIsDown(DOWN_ARROW) || keyIsDown(83)) dy += 1;  // S
+
+  // 手機版：讀取左下角虛擬搖桿
+  updateVirtualJoystick();
+  dx += virtualJoystick.dx;
+  dy += virtualJoystick.dy;
 
   // 斜向移動時避免速度變太快
   if (dx !== 0 || dy !== 0) {
@@ -1425,7 +1445,7 @@ function drawTitleScreen() {
 
   fill(210);
   textSize(18);
-  text("p5.js Web Editor 示範版 v5", width / 2, 150);
+  text("p5.js Web Editor 示範版 v6 手機版", width / 2, 150);
 
   const charData = getSelectedCharacter();
 
@@ -1444,8 +1464,8 @@ function drawTitleScreen() {
 
   fill(170);
   textSize(14);
-  text("操作：WASD / 方向鍵移動。攻擊會自動發射。升級時按 1 / 2 / 3。", width / 2, 548);
-  text("R：清除存檔與解鎖紀錄", width / 2, 574);
+  text("電腦：WASD / 方向鍵移動｜手機：左下角搖桿移動｜攻擊會自動發射", width / 2, 548);
+  text("升級時按 1 / 2 / 3 或直接點選｜建議手機橫向遊玩｜R：清除存檔", width / 2, 574);
 }
 
 function drawCharacterScreen() {
@@ -2047,6 +2067,109 @@ function fillWithAlpha(hexColor, alpha) {
   fill(c);
 }
 
+
+// ============================================================
+// 十六、手機觸控操作：虛擬搖桿
+// ============================================================
+
+function isTouchDevice() {
+  return typeof navigator !== "undefined" && navigator.maxTouchPoints > 0;
+}
+
+function updateVirtualJoystick() {
+  virtualJoystick.baseX = 95;
+  virtualJoystick.baseY = height - 95;
+
+  virtualJoystick.active = false;
+  virtualJoystick.dx = 0;
+  virtualJoystick.dy = 0;
+  virtualJoystick.knobX = virtualJoystick.baseX;
+  virtualJoystick.knobY = virtualJoystick.baseY;
+
+  // 只有遊戲中才讀取搖桿
+  if (gameState !== "playing") return;
+
+  // 找左半邊、偏下方的觸控點當作移動搖桿
+  for (let t of touches) {
+    if (t.x < width * 0.58 && t.y > height * 0.25) {
+      let vx = t.x - virtualJoystick.baseX;
+      let vy = t.y - virtualJoystick.baseY;
+      let d = sqrt(vx * vx + vy * vy);
+      let maxR = virtualJoystick.r;
+
+      if (d > maxR) {
+        vx = vx / d * maxR;
+        vy = vy / d * maxR;
+        d = maxR;
+      }
+
+      virtualJoystick.active = true;
+      virtualJoystick.knobX = virtualJoystick.baseX + vx;
+      virtualJoystick.knobY = virtualJoystick.baseY + vy;
+      virtualJoystick.dx = vx / maxR;
+      virtualJoystick.dy = vy / maxR;
+      return;
+    }
+  }
+}
+
+function drawMobileControls() {
+  // 桌機也可以顯示，但手機最有用。
+  // 用 navigator.maxTouchPoints 判斷，避免桌機畫面太擠。
+  if (!isTouchDevice()) return;
+
+  // 遊戲中：左下角搖桿
+  if (gameState === "playing") {
+    let bx = virtualJoystick.baseX;
+    let by = virtualJoystick.baseY;
+    let kx = virtualJoystick.active ? virtualJoystick.knobX : bx;
+    let ky = virtualJoystick.active ? virtualJoystick.knobY : by;
+
+    push();
+    noStroke();
+
+    fill(0, 0, 0, 95);
+    circle(bx, by, virtualJoystick.r * 2 + 18);
+
+    noFill();
+    stroke(255, 255, 255, 120);
+    strokeWeight(3);
+    circle(bx, by, virtualJoystick.r * 2);
+
+    noStroke();
+    fill(168, 255, 120, 160);
+    circle(kx, ky, 42);
+
+    fill(255, 255, 255, 180);
+    textAlign(CENTER, CENTER);
+    textSize(13);
+    text("移動", bx, by + virtualJoystick.r + 26);
+    pop();
+  }
+}
+
+// 手機觸控開始：在非遊戲中頁面，讓按鈕可以更穩定被點擊。
+// 遊戲中則交給 updateVirtualJoystick() 讀取 touches。
+function touchStarted() {
+  if (gameState !== "playing") {
+    if (touches.length > 0) {
+      handlePointerPressed(touches[0].x, touches[0].y);
+    }
+  }
+  return false; // 避免手機頁面滑動或縮放
+}
+
+function touchMoved() {
+  return false; // 避免拖動搖桿時網頁跟著滑
+}
+
+function touchEnded() {
+  virtualJoystick.active = false;
+  virtualJoystick.dx = 0;
+  virtualJoystick.dy = 0;
+  return false;
+}
+
 // ============================================================
 // 十六、鍵盤與滑鼠操作
 // ============================================================
@@ -2133,27 +2256,31 @@ function keyPressed() {
 }
 
 function mousePressed() {
+  handlePointerPressed(mouseX, mouseY);
+}
+
+function handlePointerPressed(px, py) {
   if (gameState === "title") {
     // 點擊開始遊戲
-    if (isMouseInRect(width / 2 - 130, 300, 260, 46)) {
+    if (isPointInRect(px, py, width / 2 - 130, 300, 260, 46)) {
       resetGame();
       return;
     }
 
     // 點擊選擇角色
-    if (isMouseInRect(width / 2 - 130, 358, 260, 46)) {
+    if (isPointInRect(px, py, width / 2 - 130, 358, 260, 46)) {
       gameState = "character";
       return;
     }
 
     // 點擊武器圖鑑
-    if (isMouseInRect(width / 2 - 130, 416, 260, 46)) {
+    if (isPointInRect(px, py, width / 2 - 130, 416, 260, 46)) {
       gameState = "weaponDex";
       return;
     }
 
     // 點擊殭屍圖鑑
-    if (isMouseInRect(width / 2 - 130, 474, 260, 46)) {
+    if (isPointInRect(px, py, width / 2 - 130, 474, 260, 46)) {
       gameState = "zombieDex";
       return;
     }
@@ -2170,7 +2297,7 @@ function mousePressed() {
       let x = startX + i * 205;
       let y = 130;
 
-      if (isMouseInRect(x, y, cardW, cardH)) {
+      if (isPointInRect(px, py, x, y, cardW, cardH)) {
         if (unlockedCharacters[c.id]) {
           selectedCharacterId = c.id;
           saveData();
@@ -2180,22 +2307,22 @@ function mousePressed() {
     }
 
     // 選角頁底部按鈕
-    if (isMouseInRect(width / 2 - 280, 480, 180, 42)) {
+    if (isPointInRect(px, py, width / 2 - 280, 480, 180, 42)) {
       gameState = "title";
       return;
     }
 
-    if (isMouseInRect(width / 2 - 90, 480, 180, 42)) {
+    if (isPointInRect(px, py, width / 2 - 90, 480, 180, 42)) {
       resetGame();
       return;
     }
 
-    if (isMouseInRect(width / 2 + 100, 480, 180, 42)) {
+    if (isPointInRect(px, py, width / 2 + 100, 480, 180, 42)) {
       gameState = "weaponDex";
       return;
     }
 
-    if (isMouseInRect(width / 2 - 90, 535, 180, 42)) {
+    if (isPointInRect(px, py, width / 2 - 90, 535, 180, 42)) {
       gameState = "zombieDex";
       return;
     }
@@ -2212,7 +2339,7 @@ function mousePressed() {
       let x = startX + i * (cardW + gap);
       let y = 250;
 
-      if (isMouseInRect(x, y, cardW, cardH)) {
+      if (isPointInRect(px, py, x, y, cardW, cardH)) {
         chooseUpgrade(i);
       }
     }
@@ -2220,32 +2347,32 @@ function mousePressed() {
 
   if (gameState === "gameover") {
     // 點擊再玩一次
-    if (isMouseInRect(width / 2 - 290, 465, 180, 44)) {
+    if (isPointInRect(px, py, width / 2 - 290, 465, 180, 44)) {
       resetGame();
       return;
     }
 
-    if (isMouseInRect(width / 2 - 90, 465, 180, 44)) {
+    if (isPointInRect(px, py, width / 2 - 90, 465, 180, 44)) {
       gameState = "character";
       return;
     }
 
-    if (isMouseInRect(width / 2 + 110, 465, 180, 44)) {
+    if (isPointInRect(px, py, width / 2 + 110, 465, 180, 44)) {
       gameState = "title";
       return;
     }
   }
 
   if (gameState === "weaponDex" || gameState === "zombieDex") {
-    if (isMouseInRect(width / 2 - 100, 535, 200, 42)) {
+    if (isPointInRect(px, py, width / 2 - 100, 535, 200, 42)) {
       gameState = "title";
       return;
     }
   }
 }
 
-function isMouseInRect(x, y, w, h) {
-  return mouseX > x && mouseX < x + w && mouseY > y && mouseY < y + h;
+function isPointInRect(px, py, x, y, w, h) {
+  return px > x && px < x + w && py > y && py < y + h;
 }
 
 // ============================================================
